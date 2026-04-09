@@ -7,7 +7,8 @@ factor_framework
                       时序: ts_ema, ts_slope, ts_rsi, ts_drawdown, ts_beta,
                             ts_regression_residual, ts_decay_linear, ts_prod
                       横截面: cs_rank_by_group, cs_neutralize, cs_top_n, cs_quantile
-  factor_engine.py  - 因子注册 / 计算 / 面板构建引擎（DataFrame 缓存）
+  factor_engine.py  - 因子注册 / 计算 / 面板构建引擎（DataFrame 缓存，DAG 依赖管理）
+  dag.py            - DAG 节点类、LRU 缓存、DAGExecutor、DepGraph、CSE 报告
   neutralize.py     - 因子中性化（市值、行业、波动率、Beta、动量、流动性；OLS / WLS）
   ic_analysis.py    - IC 分析、t 检验、IC 衰减（向量化实现）
   backtest.py       - 分层回测、多空组合、夏普/最大回撤/Calmar
@@ -26,3 +27,9 @@ pipe.run_composite(['momentum_12_1', 'size_log_mktcap'], method='icir')
 """
 
 from factor_framework.optimizer import equal_weight, icir_weight, print_weights
+from factor_framework.dag import (
+    Expr, DataNode, OpNode, BinOpNode, ConstNode, PctChangeNode,
+    data, const, op, pct_change,
+    DAGExecutor, DepGraph, LRUCache,
+    cse_report,
+)

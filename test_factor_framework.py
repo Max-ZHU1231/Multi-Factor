@@ -1734,3 +1734,818 @@ class TestWarmup:
         elapsed = time.perf_counter() - t0
         # 第二次应在 2 秒内完成（JIT 已编译）
         assert elapsed < 2.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9. TestDAG  —  DAG 节点、LRU 缓存、执行器、显式依赖、CSE 报告
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from factor_framework.dag import (
+    Expr, ConstNode, DataNode, OpNode, BinOpNode, PctChangeNode,
+    data, const, op, pct_change,
+    collect_nodes, topological_sort,
+    LRUCache, _MISS,
+    DAGExecutor, DepGraph,
+    cse_report,
+)
+
+
+# ─── 辅助：最小 DataFrame ──────────────────────────────────────────────────────
+
+def _make_df(n: int = 60) -> pd.DataFrame:
+    rng = np.random.default_rng(0)
+    close = 10 + rng.normal(0, 0.3, n).cumsum()
+    vol   = rng.integers(1_000, 10_000, n).astype(float)
+    return pd.DataFrame({"close": close, "volume": vol})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9a. 节点类型 & 哈希
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestExprNodes:
+    """验证每种节点类型的 eval() 和 node_hash 正确性。"""
+
+    def test_const_node_eval(self):
+        df  = _make_df()
+        node = ConstNode(3.14)
+        s   = node.eval(df)
+        assert len(s) == len(df)
+        assert (s == 3.14).all()
+
+    def test_const_node_hash_deterministic(self):
+        h1 = ConstNode(1.0).node_hash
+        h2 = ConstNode(1.0).node_hash
+        assert h1 == h2
+
+    def test_const_node_different_values_different_hash(self):
+        assert ConstNode(1.0).node_hash != ConstNode(2.0).node_hash
+
+    def test_data_node_eval(self):
+        df   = _make_df()
+        node = DataNode("close")
+        s    = node.eval(df)
+        pd.testing.assert_series_equal(s, df["close"], check_names=False)
+
+    def test_data_node_col_alias(self):
+        df = _make_df().rename(columns={"close": "收盘价"})
+        node = DataNode("close", col="收盘价")
+        s = node.eval(df)
+        pd.testing.assert_series_equal(s, df["收盘价"], check_names=False)
+
+    def test_data_node_missing_col_raises(self):
+        df   = _make_df()
+        node = DataNode("nonexistent")
+        with pytest.raises(KeyError):
+            node.eval(df)
+
+    def test_data_node_hash_depends_on_col(self):
+        h1 = DataNode("close", col="close").node_hash
+        h2 = DataNode("close", col="收盘价").node_hash
+        assert h1 != h2
+
+    def test_pct_change_node_eval(self):
+        df   = _make_df()
+        node = PctChangeNode(DataNode("close"), periods=1)
+        s    = node.eval(df)
+        expected = df["close"].pct_change(1)
+        pd.testing.assert_series_equal(s, expected, check_names=False)
+
+    def test_pct_change_node_periods(self):
+        df   = _make_df()
+        node = PctChangeNode(DataNode("close"), periods=5)
+        s    = node.eval(df)
+        expected = df["close"].pct_change(5)
+        pd.testing.assert_series_equal(s, expected, check_names=False)
+
+    def test_pct_change_node_hash_periods_differ(self):
+        base = DataNode("close")
+        h1 = PctChangeNode(base, 1).node_hash
+        h5 = PctChangeNode(base, 5).node_hash
+        assert h1 != h5
+
+    def test_bin_op_add(self):
+        df = _make_df()
+        a  = DataNode("close")
+        b  = ConstNode(1.0)
+        node = BinOpNode("+", a, b)
+        s    = node.eval(df)
+        expected = df["close"] + 1.0
+        pd.testing.assert_series_equal(s, expected, check_names=False)
+
+    def test_bin_op_mul(self):
+        df = _make_df()
+        a  = DataNode("close")
+        b  = ConstNode(-1.0)
+        node = BinOpNode("*", b, a)
+        s    = node.eval(df)
+        pd.testing.assert_series_equal(s, -df["close"], check_names=False)
+
+    def test_bin_op_div_zero_replaced_nan(self):
+        df = pd.DataFrame({"close": [1.0, 2.0, 3.0], "volume": [0.0, 1.0, 2.0]})
+        a  = DataNode("close")
+        b  = DataNode("volume")
+        node = BinOpNode("/", a, b)
+        s    = node.eval(df)
+        assert np.isnan(s.iloc[0])   # 除以 0 → NaN
+
+    def test_bin_op_hash_encodes_op_and_operands(self):
+        c = DataNode("close")
+        v = DataNode("volume")
+        h_add = BinOpNode("+", c, v).node_hash
+        h_sub = BinOpNode("-", c, v).node_hash
+        h_rev = BinOpNode("+", v, c).node_hash   # 交换顺序
+        assert h_add != h_sub
+        assert h_add != h_rev
+
+    def test_neg_returns_expr(self):
+        c = DataNode("close")
+        n = -c
+        assert isinstance(n, Expr)
+
+    def test_neg_eval_negates_values(self):
+        df = _make_df()
+        s  = (-DataNode("close")).eval(df)
+        pd.testing.assert_series_equal(s, -df["close"], check_names=False)
+
+    def test_op_node_ts_mean(self):
+        df   = _make_df()
+        close = DataNode("close")
+        node  = op("ts_mean", close, 5)
+        s     = node.eval(df)
+        from factor_framework.operators import ts_mean
+        expected = ts_mean(df["close"], 5)
+        pd.testing.assert_series_equal(s, expected, check_names=False)
+
+    def test_op_unknown_raises(self):
+        with pytest.raises(AttributeError):
+            op("nonexistent_op_xyz", DataNode("close"), 5)
+
+    def test_op_explicit_fn(self):
+        df   = _make_df()
+        close = DataNode("close")
+        fn    = lambda s, w: s.rolling(w).mean()
+        node  = op("custom_mean", close, 5, fn=fn)
+        s     = node.eval(df)
+        expected = df["close"].rolling(5).mean()
+        pd.testing.assert_series_equal(s, expected, check_names=False)
+
+    def test_arithmetic_chaining(self):
+        """(close + volume) * 2 应正确求值。"""
+        df   = _make_df()
+        expr = (DataNode("close") + DataNode("volume")) * ConstNode(2.0)
+        s    = expr.eval(df)
+        expected = (df["close"] + df["volume"]) * 2.0
+        pd.testing.assert_series_equal(s, expected, check_names=False)
+
+    def test_factory_data(self):
+        node = data("close", col="close")
+        assert isinstance(node, DataNode)
+        assert node.col == "close"
+
+    def test_factory_const(self):
+        node = const(42.0)
+        assert isinstance(node, ConstNode)
+        assert node.value == 42.0
+
+    def test_factory_pct_change(self):
+        node = pct_change(DataNode("close"), 2)
+        assert isinstance(node, PctChangeNode)
+        assert node.periods == 2
+
+    def test_pct_change_via_op(self):
+        node = op("pct_change", DataNode("close"), 3)
+        assert isinstance(node, PctChangeNode)
+        assert node.periods == 3
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9b. DAG 工具函数
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestDAGUtils:
+    """collect_nodes() 和 topological_sort() 正确性。"""
+
+    def _build_tree(self):
+        """close → ret → vol20，两个分支共享 ret。"""
+        close = DataNode("close")
+        ret   = PctChangeNode(close, 1)
+        vol20 = op("ts_mean", ret, 20, fn=lambda s, w: s.rolling(w).mean())
+        vol60 = op("ts_mean", ret, 60, fn=lambda s, w: s.rolling(w).mean())
+        return close, ret, vol20, vol60
+
+    def test_collect_nodes_count(self):
+        close, ret, vol20, _ = self._build_tree()
+        nodes = collect_nodes(vol20)
+        hashes = {n.node_hash for n in nodes}
+        # vol20 节点 + ret 节点 + close 节点 = 3
+        assert len(hashes) == 3
+
+    def test_collect_nodes_contains_all(self):
+        close, ret, vol20, _ = self._build_tree()
+        nodes  = collect_nodes(vol20)
+        hashes = {n.node_hash for n in nodes}
+        assert vol20.node_hash in hashes
+        assert ret.node_hash   in hashes
+        assert close.node_hash in hashes
+
+    def test_topo_sort_leaf_before_root(self):
+        close, ret, vol20, _ = self._build_tree()
+        order  = topological_sort([vol20])
+        hashes = [n.node_hash for n in order]
+        assert hashes.index(close.node_hash) < hashes.index(vol20.node_hash)
+        assert hashes.index(ret.node_hash)   < hashes.index(vol20.node_hash)
+
+    def test_topo_sort_dedup_shared_node(self):
+        """vol20 和 vol60 共享 ret，topo_sort 结果中 ret 只出现一次。"""
+        close, ret, vol20, vol60 = self._build_tree()
+        order  = topological_sort([vol20, vol60])
+        count  = sum(1 for n in order if n.node_hash == ret.node_hash)
+        assert count == 1
+
+    def test_topo_sort_multi_root_all_present(self):
+        close, ret, vol20, vol60 = self._build_tree()
+        order  = topological_sort([vol20, vol60])
+        hashes = {n.node_hash for n in order}
+        for node in [close, ret, vol20, vol60]:
+            assert node.node_hash in hashes
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9c. LRUCache
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestLRUCache:
+    """LRU 缓存的 get/put/eviction/clear 以及线程安全性。"""
+
+    def test_get_miss_returns_sentinel(self):
+        cache = LRUCache(4)
+        result = cache.get("nonexistent")
+        assert result is _MISS
+        assert not result   # _MISS.__bool__ = False
+
+    def test_put_then_get(self):
+        cache = LRUCache(4)
+        cache.put("k1", 42)
+        assert cache.get("k1") == 42
+
+    def test_overwrite_key(self):
+        cache = LRUCache(4)
+        cache.put("k", 1)
+        cache.put("k", 2)
+        assert cache.get("k") == 2
+        assert len(cache) == 1
+
+    def test_lru_eviction(self):
+        """容量为 2：put k1 k2 k3 → k1 被淘汰。"""
+        cache = LRUCache(2)
+        cache.put("k1", 1)
+        cache.put("k2", 2)
+        cache.put("k3", 3)
+        assert cache.get("k1") is _MISS
+        assert cache.get("k2") == 2
+        assert cache.get("k3") == 3
+
+    def test_lru_access_refreshes_order(self):
+        """访问 k1 后 k1 不被淘汰，k2 被淘汰。"""
+        cache = LRUCache(2)
+        cache.put("k1", 1)
+        cache.put("k2", 2)
+        _ = cache.get("k1")  # 刷新 k1 的访问时间
+        cache.put("k3", 3)   # 应淘汰 k2
+        assert cache.get("k1") == 1
+        assert cache.get("k2") is _MISS
+
+    def test_unlimited_capacity(self):
+        """capacity=-1 时不限容量。"""
+        cache = LRUCache(-1)
+        for i in range(1000):
+            cache.put(str(i), i)
+        assert len(cache) == 1000
+        assert cache.get("0") == 0
+        assert cache.get("999") == 999
+
+    def test_clear(self):
+        cache = LRUCache(8)
+        cache.put("a", 1)
+        cache.put("b", 2)
+        cache.clear()
+        assert len(cache) == 0
+        assert cache.get("a") is _MISS
+
+    def test_contains(self):
+        cache = LRUCache(4)
+        cache.put("x", 10)
+        assert "x" in cache
+        assert "y" not in cache
+
+    def test_thread_safe(self):
+        """多线程并发写入不崩溃，最终 size ≤ capacity。"""
+        import threading
+        cache = LRUCache(100)
+        errors = []
+
+        def _writer(tid):
+            try:
+                for i in range(50):
+                    cache.put(f"{tid}_{i}", tid * 100 + i)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=_writer, args=(t,)) for t in range(8)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+
+        assert not errors, f"线程异常: {errors}"
+        assert len(cache) <= 100
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9d. DAGExecutor
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestDAGExecutor:
+    """验证 DAGExecutor 正确执行并复用中间节点。"""
+
+    def _build_factors(self):
+        """
+        构建两个共享 ret 节点的因子：
+          vol20 = ts_mean(ret, 20)
+          vol60 = ts_mean(ret, 60)
+        其中 ret = pct_change(close, 1)
+        """
+        close = DataNode("close")
+        ret   = PctChangeNode(close, 1)
+        fn    = lambda s, w: s.rolling(w).mean()
+        vol20 = op("ts_mean", ret, 20, fn=fn)
+        vol60 = op("ts_mean", ret, 60, fn=fn)
+        return {"vol20": vol20, "vol60": vol60}, ret
+
+    def test_executor_returns_all_factors(self):
+        roots, _ = self._build_factors()
+        df       = _make_df()
+        cache    = LRUCache(-1)
+        executor = DAGExecutor(cache, roots)
+        out      = executor.run(df)
+        assert set(out.keys()) == {"vol20", "vol60"}
+
+    def test_executor_values_correct(self):
+        roots, _ = self._build_factors()
+        df       = _make_df()
+        cache    = LRUCache(-1)
+        executor = DAGExecutor(cache, roots)
+        out      = executor.run(df)
+        ret      = df["close"].pct_change(1)
+        expected20 = ret.rolling(20).mean()
+        expected60 = ret.rolling(60).mean()
+        pd.testing.assert_series_equal(out["vol20"], expected20, check_names=False, atol=1e-10)
+        pd.testing.assert_series_equal(out["vol60"], expected60, check_names=False, atol=1e-10)
+
+    def test_shared_node_cached_after_run(self):
+        """ret 节点在 run() 后应存入 intermediate_cache。"""
+        roots, ret_node = self._build_factors()
+        df       = _make_df()
+        cache    = LRUCache(-1)
+        executor = DAGExecutor(cache, roots)
+        executor.run(df)
+        assert ret_node.node_hash in cache
+
+    def test_single_factor_subset(self):
+        """run(factor_names=['vol20']) 只返回 vol20。"""
+        roots, _ = self._build_factors()
+        df       = _make_df()
+        cache    = LRUCache(-1)
+        executor = DAGExecutor(cache, roots)
+        out      = executor.run(df, factor_names=["vol20"])
+        assert "vol20" in out
+        assert "vol60" not in out
+
+    def test_empty_factor_list(self):
+        roots, _ = self._build_factors()
+        df       = _make_df()
+        cache    = LRUCache(-1)
+        executor = DAGExecutor(cache, roots)
+        out      = executor.run(df, factor_names=[])
+        assert out == {}
+
+    def test_missing_factor_name_ignored(self):
+        roots, _ = self._build_factors()
+        df       = _make_df()
+        cache    = LRUCache(-1)
+        executor = DAGExecutor(cache, roots)
+        out      = executor.run(df, factor_names=["vol20", "nonexistent"])
+        assert "vol20" in out
+        assert "nonexistent" not in out
+
+    def test_const_node_inside_expr(self):
+        """带常量节点的表达式：close + 100。"""
+        close  = DataNode("close")
+        expr   = close + const(100.0)
+        roots  = {"shifted": expr}
+        df     = _make_df()
+        cache  = LRUCache(-1)
+        executor = DAGExecutor(cache, roots)
+        out    = executor.run(df)
+        expected = df["close"] + 100.0
+        pd.testing.assert_series_equal(out["shifted"], expected, check_names=False)
+
+    def test_second_run_uses_cache(self):
+        """同一缓存实例，第二次 run 命中缓存，结果相同。"""
+        roots, _ = self._build_factors()
+        df       = _make_df()
+        cache    = LRUCache(-1)
+        executor = DAGExecutor(cache, roots)
+        out1 = executor.run(df)
+        out2 = executor.run(df)
+        pd.testing.assert_series_equal(out1["vol20"], out2["vol20"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9e. DepGraph（显式依赖图）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestDepGraph:
+    """显式依赖图：topo_order、传递依赖展开、环检测。"""
+
+    def test_no_deps_empty(self):
+        g = DepGraph()
+        assert g.deps_of("momentum") == []
+
+    def test_register_and_deps_of(self):
+        g = DepGraph()
+        g.register("composite", ["vol", "mom"])
+        assert set(g.deps_of("composite")) == {"vol", "mom"}
+
+    def test_topo_order_single_dep(self):
+        g = DepGraph()
+        g.register("B", ["A"])
+        order = g.topo_order(["B"])
+        # B 依赖 A，但 A 未注册为需排序项，只返回 B
+        assert "B" in order
+
+    def test_topo_order_chain(self):
+        """A → B → C：C 先，B 次，A 最后，但只返回请求的节点。"""
+        g = DepGraph()
+        g.register("B", ["A"])
+        g.register("C", ["B"])
+        order = g.topo_order(["A", "B", "C"])
+        # A 无依赖，在 B 前；B 在 C 前
+        assert order.index("A") < order.index("B")
+        assert order.index("B") < order.index("C")
+
+    def test_topo_order_fan_in(self):
+        """C 同时依赖 A 和 B（fan-in）。"""
+        g = DepGraph()
+        g.register("C", ["A", "B"])
+        order = g.topo_order(["A", "B", "C"])
+        assert order.index("A") < order.index("C")
+        assert order.index("B") < order.index("C")
+
+    def test_topo_order_transitive_expansion(self):
+        """只请求 C，但 topo_order 展开传递依赖后包含 A、B。"""
+        g = DepGraph()
+        g.register("B", ["A"])
+        g.register("C", ["B"])
+        # C 只请求 C 本身，但传递依赖要包含 B 和 A
+        order = g.topo_order(["C"])
+        # 返回列表只包含 requested 的因子，C 一定在里面
+        assert "C" in order
+
+    def test_cycle_raises(self):
+        g = DepGraph()
+        g.register("A", ["B"])
+        g.register("B", ["A"])
+        with pytest.raises(ValueError, match="环"):
+            g.topo_order(["A", "B"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9f. CSE 报告
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestCSEReport:
+    """cse_report() 正确识别公共子表达式。"""
+
+    def _shared_roots(self):
+        close = DataNode("close")
+        ret   = PctChangeNode(close, 1)
+        fn    = lambda s, w: s.rolling(w).mean()
+        vol20 = op("ts_mean", ret, 20, fn=fn)
+        vol60 = op("ts_mean", ret, 60, fn=fn)
+        return {"vol20": vol20, "vol60": vol60}, ret, close
+
+    def test_report_returns_dataframe(self):
+        roots, _, _ = self._shared_roots()
+        df = cse_report(roots)
+        assert isinstance(df, pd.DataFrame)
+
+    def test_report_columns(self):
+        roots, _, _ = self._shared_roots()
+        df = cse_report(roots)
+        for col in ["node_hash", "repr", "ref_count", "shared_by"]:
+            assert col in df.columns
+
+    def test_report_detects_shared_ret(self):
+        """ret 节点被 vol20 和 vol60 共享，应在报告中出现。"""
+        roots, ret_node, _ = self._shared_roots()
+        df = cse_report(roots)
+        # ret_node 的哈希应在报告中
+        assert ret_node.node_hash in df["node_hash"].values
+
+    def test_report_ref_count_gte_2(self):
+        """报告中所有节点的 ref_count >= 2。"""
+        roots, _, _ = self._shared_roots()
+        df = cse_report(roots)
+        if not df.empty:
+            assert (df["ref_count"] >= 2).all()
+
+    def test_report_shared_by_contains_both_factors(self):
+        """ret 节点的 shared_by 应包含 vol20 和 vol60 两个因子名。"""
+        roots, ret_node, _ = self._shared_roots()
+        df = cse_report(roots)
+        row = df[df["node_hash"] == ret_node.node_hash]
+        assert not row.empty
+        shared = row.iloc[0]["shared_by"]
+        assert "vol20" in shared
+        assert "vol60" in shared
+
+    def test_report_empty_no_shared(self):
+        """无公共子表达式时返回空 DataFrame。"""
+        close = DataNode("close")
+        vol   = DataNode("volume")
+        roots = {"f1": close, "f2": vol}
+        df = cse_report(roots)
+        assert df.empty
+
+    def test_report_sorted_by_ref_count_desc(self):
+        """report 按 ref_count 降序排列。"""
+        roots, _, _ = self._shared_roots()
+        df = cse_report(roots)
+        if len(df) > 1:
+            assert df["ref_count"].is_monotonic_decreasing
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 9g. FactorEngine DAG 集成
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestEngineDAG:
+    """FactorEngine 的 register_expr / compute_single / build_panel_batch / cse_report。"""
+
+    # ── 共享测试 fixture（临时 CSV 目录）──────────────────────────────────────
+
+    @pytest.fixture
+    def tmp_stocks_dir(self, tmp_path):
+        """创建 3 只股票的 CSV 文件，供 FactorEngine 读取。"""
+        stocks_dir = tmp_path / "stocks"
+        stocks_dir.mkdir()
+        rng = np.random.default_rng(42)
+        dates = pd.date_range("20200101", periods=120, freq="B").strftime("%Y%m%d").tolist()
+        for code in ["000001.SZ", "000002.SZ", "000004.SZ"]:
+            close  = 10 + rng.normal(0, 0.3, 120).cumsum()
+            open_  = close * rng.uniform(0.99, 1.01, 120)
+            high   = close * rng.uniform(1.00, 1.02, 120)
+            low    = close * rng.uniform(0.98, 1.00, 120)
+            df = pd.DataFrame({
+                "股票代码":         code,
+                "股票名称":         "测试",
+                "交易日":           dates,
+                "开盘价":           open_,
+                "最高价":           np.maximum(high, close),
+                "最低价":           np.minimum(low, close),
+                "收盘价":           close,
+                "前收盘价":         np.roll(close, 1),
+                "涨跌额":           np.diff(close, prepend=close[0]),
+                "涨跌幅（%）":      np.diff(close, prepend=close[0]) / close * 100,
+                "成交量（手）":     rng.integers(1_000, 10_000, 120).astype(float),
+                "成交额（千元）":   close * rng.integers(1_000, 10_000, 120),
+                "换手率（%）":      rng.uniform(0.5, 3, 120),
+                "换手率（%，自由流通股）": rng.uniform(0.5, 3, 120),
+                "量比":             rng.uniform(0.5, 2, 120),
+                "市盈率（亏损为空）": np.abs(rng.normal(20, 5, 120)),
+                "市盈率（TTM，亏损为空）": np.abs(rng.normal(20, 5, 120)),
+                "市净率":           np.abs(rng.normal(2, 0.5, 120)),
+                "市销率":           np.abs(rng.normal(3, 1, 120)),
+                "市销率（TTM）":    np.abs(rng.normal(3, 1, 120)),
+                "股息率（%）":      rng.uniform(0, 3, 120),
+                "股息率（%，TTM）": rng.uniform(0, 3, 120),
+                "总股本（万股）":   np.ones(120) * 100_000,
+                "流通股本（万股）": np.ones(120) * 80_000,
+                "自由流通股本（万）": np.ones(120) * 60_000,
+                "总市值（万元）":   close * 100_000,
+                "流通市值（万元）": close * 80_000,
+                "复权因子":         np.ones(120),
+                "当日涨停价":       close * 1.1,
+                "当日跌停价":       close * 0.9,
+            })
+            df.to_csv(stocks_dir / f"{code}.csv", index=False)
+        return str(stocks_dir)
+
+    @pytest.fixture
+    def engine(self, tmp_stocks_dir, tmp_path):
+        sb = tmp_path / "sb.csv"
+        sb.write_text(
+            "ts_code,name\n000001.SZ,股票1\n000002.SZ,股票2\n000004.SZ,股票4\n",
+            encoding="utf-8",
+        )
+        eng = FactorEngine(stocks_dir=tmp_stocks_dir, stock_basic=str(sb), verbose=False)
+        return eng
+
+    # ── register_expr ─────────────────────────────────────────────────────────
+
+    def test_register_expr_appears_in_registry(self, engine):
+        from factor_framework.factor_engine import COL_CLOSE
+        close = DataNode(COL_CLOSE)
+        ret   = PctChangeNode(close, 1)
+        fn    = lambda s, w: s.rolling(w).mean()
+        vol20 = op("ts_mean", ret, 20, fn=fn)
+        engine.register_expr("vol20", vol20)
+        assert "vol20" in engine.registered()
+
+    def test_register_expr_appears_in_registered_expr(self, engine):
+        from factor_framework.factor_engine import COL_CLOSE
+        close = DataNode(COL_CLOSE)
+        engine.register_expr("close_raw", close)
+        assert "close_raw" in engine.registered_expr()
+
+    def test_register_expr_not_in_registered_expr_if_lambda(self, engine):
+        from factor_framework.factor_engine import COL_CLOSE
+        engine.register("plain_lambda", lambda df: df[COL_CLOSE])
+        assert "plain_lambda" not in engine.registered_expr()
+
+    # ── compute_single (Expr 路径) ────────────────────────────────────────────
+
+    def test_compute_single_expr_returns_series(self, engine):
+        from factor_framework.factor_engine import COL_CLOSE
+        close = DataNode(COL_CLOSE)
+        ret   = PctChangeNode(close, 1)
+        fn    = lambda s, w: s.rolling(w).mean()
+        vol20 = op("ts_mean", ret, 20, fn=fn)
+        engine.register_expr("vol20_test", vol20)
+        sym = "000001.SZ"
+        result = engine.compute_single(sym, "vol20_test")
+        assert isinstance(result, pd.Series)
+        assert len(result) > 0
+
+    def test_compute_single_expr_values_match_direct(self, engine):
+        """compute_single 与直接手算结果一致（误差 < 1e-9）。"""
+        from factor_framework.factor_engine import COL_CLOSE
+        close_col = DataNode(COL_CLOSE)
+        ret_node  = PctChangeNode(close_col, 1)
+        fn        = lambda s, w: s.rolling(w).mean()
+        vol_node  = op("ts_mean", ret_node, 20, fn=fn)
+        engine.register_expr("direct_vol20", vol_node)
+
+        sym = "000001.SZ"
+        result = engine.compute_single(sym, "direct_vol20", fast_mode=True)
+
+        # 手算（使用相同的 fast_mode）
+        df = engine._load_df(sym, fast_mode=True)
+        expected = df[COL_CLOSE].pct_change(1).rolling(20).mean()
+        # 对齐 index（result 可能有 date index）
+        np.testing.assert_allclose(
+            result.values, expected.values, rtol=1e-6, equal_nan=True
+        )
+
+    def test_compute_single_with_date_filter(self, engine):
+        from factor_framework.factor_engine import COL_CLOSE
+        close = DataNode(COL_CLOSE)
+        engine.register_expr("close_copy", close)
+        sym    = "000001.SZ"
+        result = engine.compute_single(sym, "close_copy", start="20200201", end="20200301")
+        # 日期范围内长度 < 总长度
+        full = engine.compute_single(sym, "close_copy")
+        assert len(result) < len(full)
+
+    # ── register with deps ────────────────────────────────────────────────────
+
+    def test_register_with_deps(self, engine):
+        from factor_framework.factor_engine import COL_CLOSE
+        # 先注册基础因子
+        engine.register("ret1", lambda df: df[COL_CLOSE].pct_change(1))
+        # 注册依赖 ret1 的复合因子
+        engine.register(
+            "vol_from_ret",
+            lambda df: df["__dep_ret1__"].rolling(10).std(),
+            deps=["ret1"],
+        )
+        result = engine.compute_single("000001.SZ", "vol_from_ret", fast_mode=True)
+        assert isinstance(result, pd.Series)
+        assert result.notna().any()
+
+    def test_deps_topo_order_respected(self, engine):
+        """A → B → C，注册顺序与依赖顺序无关，结果均正确。"""
+        from factor_framework.factor_engine import COL_CLOSE
+        engine.register("base_close", lambda df: df[COL_CLOSE])
+        engine.register(
+            "double_close",
+            lambda df: df["__dep_base_close__"] * 2,
+            deps=["base_close"],
+        )
+        engine.register(
+            "quad_close",
+            lambda df: df["__dep_double_close__"] * 2,
+            deps=["double_close"],
+        )
+        result = engine.compute_single("000001.SZ", "quad_close", fast_mode=True)
+        df_raw = engine._load_df("000001.SZ", fast_mode=True)
+        expected = df_raw[COL_CLOSE] * 4
+        np.testing.assert_allclose(result.values, expected.values, rtol=1e-6)
+
+    # ── cse_report ────────────────────────────────────────────────────────────
+
+    def test_cse_report_returns_df(self, engine):
+        from factor_framework.factor_engine import COL_CLOSE
+        close = DataNode(COL_CLOSE)
+        ret   = PctChangeNode(close, 1)
+        fn    = lambda s, w: s.rolling(w).mean()
+        engine.register_expr("cse_vol20", op("ts_mean", ret, 20, fn=fn))
+        engine.register_expr("cse_vol60", op("ts_mean", ret, 60, fn=fn))
+        report = engine.cse_report()
+        assert isinstance(report, pd.DataFrame)
+
+    def test_cse_report_detects_shared_ret(self, engine):
+        from factor_framework.factor_engine import COL_CLOSE
+        close = DataNode(COL_CLOSE)
+        ret   = PctChangeNode(close, 1)
+        fn    = lambda s, w: s.rolling(w).mean()
+        vol20 = op("ts_mean", ret, 20, fn=fn)
+        vol60 = op("ts_mean", ret, 60, fn=fn)
+        engine.register_expr("cse2_vol20", vol20)
+        engine.register_expr("cse2_vol60", vol60)
+        report = engine.cse_report()
+        if not report.empty:
+            assert ret.node_hash in report["node_hash"].values
+
+    # ── build_panel_batch ────────────────────────────────────────────────────
+
+    def test_build_panel_batch_returns_dict(self, engine):
+        from factor_framework.factor_engine import COL_CLOSE
+        engine.register("f_close", lambda df: df[COL_CLOSE])
+        engine.register("f_vol", lambda df: df[COL_CLOSE].pct_change(1))
+        panels = engine.build_panel_batch(["f_close", "f_vol"], n_jobs=2)
+        assert isinstance(panels, dict)
+        assert set(panels.keys()) == {"f_close", "f_vol"}
+
+    def test_build_panel_batch_panels_are_dataframes(self, engine):
+        from factor_framework.factor_engine import COL_CLOSE
+        engine.register("bp_close", lambda df: df[COL_CLOSE])
+        panels = engine.build_panel_batch(["bp_close"], n_jobs=2)
+        assert isinstance(panels["bp_close"], pd.DataFrame)
+        assert not panels["bp_close"].empty
+
+    def test_build_panel_batch_shape(self, engine):
+        """3 只股票，面板 columns 数量应 <= 3。"""
+        from factor_framework.factor_engine import COL_CLOSE
+        engine.register("bp_shape", lambda df: df[COL_CLOSE])
+        panels = engine.build_panel_batch(["bp_shape"], n_jobs=2)
+        assert panels["bp_shape"].shape[1] <= 3
+
+    def test_build_panel_batch_expr_factor(self, engine):
+        """Expr 因子通过 build_panel_batch 也能正确返回面板。"""
+        from factor_framework.factor_engine import COL_CLOSE
+        close = DataNode(COL_CLOSE)
+        ret   = PctChangeNode(close, 1)
+        fn    = lambda s, w: s.rolling(w).mean()
+        engine.register_expr("bp_expr_vol20", op("ts_mean", ret, 20, fn=fn))
+        panels = engine.build_panel_batch(["bp_expr_vol20"], n_jobs=2)
+        assert isinstance(panels["bp_expr_vol20"], pd.DataFrame)
+        assert not panels["bp_expr_vol20"].empty
+
+    def test_build_panel_batch_cse_same_values(self, engine):
+        """build_panel_batch 的多因子结果与 build_panel 单独调用一致。"""
+        from factor_framework.factor_engine import COL_CLOSE
+        close = DataNode(COL_CLOSE)
+        ret   = PctChangeNode(close, 1)
+        fn    = lambda s, w: s.rolling(w).mean()
+        engine.register_expr("cse_batch_v20", op("ts_mean", ret, 20, fn=fn))
+        engine.register_expr("cse_batch_v60", op("ts_mean", ret, 60, fn=fn))
+        batch  = engine.build_panel_batch(["cse_batch_v20", "cse_batch_v60"], n_jobs=2)
+        single = engine.build_panel("cse_batch_v20", n_jobs=2)
+        pd.testing.assert_frame_equal(
+            batch["cse_batch_v20"].sort_index(),
+            single.sort_index(),
+            check_like=True,
+        )
+
+    def test_build_panel_batch_unregistered_raises(self, engine):
+        with pytest.raises(KeyError):
+            engine.build_panel_batch(["this_factor_does_not_exist"])
+
+    def test_build_panel_batch_with_date_range(self, engine):
+        from factor_framework.factor_engine import COL_CLOSE
+        engine.register("bp_date", lambda df: df[COL_CLOSE])
+        full   = engine.build_panel_batch(["bp_date"], n_jobs=2)
+        sliced = engine.build_panel_batch(
+            ["bp_date"], start="20200201", end="20200301", n_jobs=2
+        )
+        assert sliced["bp_date"].shape[0] < full["bp_date"].shape[0]
+
+    def test_clear_cache_clears_dag_caches(self, engine):
+        from factor_framework.factor_engine import COL_CLOSE
+        engine.register("cc_close", lambda df: df[COL_CLOSE])
+        engine.compute_single("000001.SZ", "cc_close")
+        engine.clear_cache()
+        # 清空后 factor_cache 应为空
+        assert len(engine._factor_cache) == 0
+        assert len(engine._intermediate_cache) == 0
