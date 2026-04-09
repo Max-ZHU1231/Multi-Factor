@@ -144,19 +144,50 @@ def downside_vol(df: pd.DataFrame, d: int = 60) -> pd.Series:
 # 估值因子
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def value_pb(df: pd.DataFrame) -> pd.Series:
-    """市净率倒数（BP = 1/PB，值越大→估值越低→正向）。"""
-    return 1.0 / df[_PB].replace(0, np.nan)
+def value_pb(df: pd.DataFrame, lag_days: int = 20) -> pd.Series:
+    """
+    市净率倒数（BP = 1/PB，值越大→估值越低→正向）。
+
+    Parameters
+    ----------
+    lag_days : 财务数据滞后天数（默认 20 个交易日 ≈ 1 个月）。
+               用于规避尚未公告的财报被提前使用（前瞻偏差）。
+               若数据源已按公告日严格对齐，可设为 0。
+    """
+    pb = df[_PB].replace(0, np.nan)
+    if lag_days > 0:
+        pb = pb.shift(lag_days)
+    return 1.0 / pb
 
 
-def value_pe_ttm(df: pd.DataFrame) -> pd.Series:
-    """市盈率（TTM）倒数（EP，值越大→估值越低→正向）。"""
-    return 1.0 / df[_PE].replace(0, np.nan)
+def value_pe_ttm(df: pd.DataFrame, lag_days: int = 20) -> pd.Series:
+    """
+    市盈率（TTM）倒数（EP，值越大→估值越低→正向）。
+
+    Parameters
+    ----------
+    lag_days : 财务数据滞后天数（默认 20 个交易日）。
+               防止使用尚未披露的盈利数据（前瞻偏差）。
+    """
+    pe = df[_PE].replace(0, np.nan)
+    if lag_days > 0:
+        pe = pe.shift(lag_days)
+    return 1.0 / pe
 
 
-def value_ps_ttm(df: pd.DataFrame) -> pd.Series:
-    """市销率（TTM）倒数（SP，值越大→越便宜）。"""
-    return 1.0 / df[_PS].replace(0, np.nan)
+def value_ps_ttm(df: pd.DataFrame, lag_days: int = 20) -> pd.Series:
+    """
+    市销率（TTM）倒数（SP，值越大→越便宜）。
+
+    Parameters
+    ----------
+    lag_days : 财务数据滞后天数（默认 20 个交易日）。
+               防止使用尚未披露的营收数据（前瞻偏差）。
+    """
+    ps = df[_PS].replace(0, np.nan)
+    if lag_days > 0:
+        ps = ps.shift(lag_days)
+    return 1.0 / ps
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

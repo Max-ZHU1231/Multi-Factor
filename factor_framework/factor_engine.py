@@ -24,7 +24,10 @@ panel = engine.build_panel('log_mktcap', start='20200101', end='20261231')
 
 from __future__ import annotations
 
+import os
+import threading
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -45,6 +48,50 @@ COL_VOL    = "成交量（手）"
 COL_AMOUNT = "成交额（千元）"
 COL_MKTCAP = "总市值（万元）"
 COL_RET    = "_ret"           # 日收益率（引擎内部生成）
+
+# 轻量加载时需要的最小列集合（跳过完整 MAD Winsorize，提升约 3x 速度）
+_FAST_COLS = [
+    "交易日", "股票代码",
+    "收盘价", "开盘价", "最高价", "最低价",
+    "成交量（手）", "成交额（千元）",
+    "换手率（%）", "总市值（万元）", "流通市值（万元）",
+    "市净率", "市盈率（TTM，亏损为空）", "市销率（TTM）",
+    "复权因子",
+]
+
+def _fast_load(path: Path) -> Optional[pd.DataFrame]:
+    """
+    轻量级 CSV 加载器：只读需要的列，做最基本的 ffill/排序，
+    跳过完整 MAD Winsorize，速度约为 load_and_clean 的 3 倍。
+    用于因子面板批量构建的性能关键路径。
+    """
+    try:
+        # 先读表头确认哪些列存在
+        header = pd.read_csv(path, nrows=0)
+        usecols = [c for c in _FAST_COLS if c in header.columns]
+        df = pd.read_csv(path, usecols=usecols, dtype={"交易日": str, "股票代码": str})
+    except Exception:
+        return None
+
+    if "交易日" not in df.columns:
+        return None
+
+    df = df.sort_values("交易日").reset_index(drop=True)
+
+    # 价格列 ffill（最多 5 天，处理停牌）
+    price_cols = ["收盘价", "开盘价", "最高价", "最低价", "成交量（手）",
+                  "成交额（千元）", "换手率（%）", "总市值（万元）", "流通市值（万元）"]
+    for col in price_cols:
+        if col in df.columns:
+            df[col] = df[col].ffill(limit=5)
+
+    # 估值列 ffill 不限长度（PIT 原则）
+    val_cols = ["市净率", "市盈率（TTM，亏损为空）", "市销率（TTM）", "复权因子"]
+    for col in val_cols:
+        if col in df.columns:
+            df[col] = df[col].ffill()
+
+    return df
 
 
 class FactorEngine:
@@ -72,6 +119,14 @@ class FactorEngine:
 
         # 行业映射 ts_code → industry（来自 stock_basic）
         self._industry_map: Optional[pd.Series] = None
+
+        # ── DataFrame 缓存（瓶颈 2：消除多因子重复读盘）────────────────────
+        # 键：symbol（文件 stem），值：已清洗的 DataFrame 或 None（文件不存在/新股）
+        # fast_mode=True / False 分别用独立缓存，避免混用
+        self._cache_fast: Dict[str, Optional[pd.DataFrame]] = {}
+        self._cache_full: Dict[str, Optional[pd.DataFrame]] = {}
+        # 缓存锁（ThreadPoolExecutor 下保证写安全）
+        self._cache_lock = threading.Lock()
 
         self._load_meta()
 
@@ -120,6 +175,48 @@ class FactorEngine:
         """列出所有已注册因子名称。"""
         return list(self._registry.keys())
 
+    def clear_cache(self) -> None:
+        """手动清空 DataFrame 缓存（释放内存）。"""
+        with self._cache_lock:
+            self._cache_fast.clear()
+            self._cache_full.clear()
+
+    # ── 带缓存的数据加载（瓶颈 2 核心）─────────────────────────────────────
+
+    def _load_df(self, symbol: str, fast_mode: bool) -> Optional[pd.DataFrame]:
+        """
+        加载单只股票的 DataFrame，结果写入缓存。
+        同一 symbol + fast_mode 组合只读一次磁盘；
+        后续调用（换因子）直接返回缓存对象（只读，不允许修改）。
+        """
+        cache = self._cache_fast if fast_mode else self._cache_full
+
+        # 先无锁快速查询（绝大多数情况命中）
+        if symbol in cache:
+            return cache[symbol]
+
+        # 缓存未命中：加锁后二次检查再读盘（防止并发重复加载）
+        with self._cache_lock:
+            if symbol in cache:
+                return cache[symbol]
+
+            path = self.stocks_dir / f"{symbol}.csv"
+            if not path.exists():
+                cache[symbol] = None
+                return None
+
+            df = _fast_load(path) if fast_mode else load_and_clean(path)
+
+            if df is None or len(df) < self.min_rows:
+                cache[symbol] = None
+            else:
+                # 内部生成日收益率列，一次即可
+                df = df.copy()
+                df[COL_RET] = df[COL_CLOSE].pct_change()
+                cache[symbol] = df
+
+            return cache[symbol]
+
     # ── 单股计算 ──────────────────────────────────────────────────────────────
 
     def compute_single(
@@ -128,9 +225,15 @@ class FactorEngine:
         factor_name: str,
         start:       Optional[str] = None,
         end:         Optional[str] = None,
+        fast_mode:   bool = False,
     ) -> Optional[pd.Series]:
         """
         计算单只股票的因子值序列。
+
+        Parameters
+        ----------
+        fast_mode : True = 使用轻量加载器（跳过 MAD Winsorize，速度 ~3x）；
+                    False = 使用完整 load_and_clean（含 MAD Winsorize）
 
         Returns
         -------
@@ -139,22 +242,20 @@ class FactorEngine:
         if factor_name not in self._registry:
             raise KeyError(f"因子 '{factor_name}' 未注册，请先调用 register()。")
 
-        path = self.stocks_dir / f"{symbol}.csv"
-        if not path.exists():
+        # 从缓存获取（不再每次重复读盘）
+        df = self._load_df(symbol, fast_mode)
+        if df is None:
             return None
 
-        df = load_and_clean(path)
-        if df is None or len(df) < self.min_rows:
-            return None
+        # 日期筛选（在缓存副本上切片，不修改缓存）
+        if start or end:
+            mask = pd.Series(True, index=df.index)
+            if start:
+                mask &= df[COL_DATE] >= start
+            if end:
+                mask &= df[COL_DATE] <= end
+            df = df.loc[mask]
 
-        # 内部生成日收益率列（供动量类因子使用）
-        df[COL_RET] = df[COL_CLOSE].pct_change()
-
-        # 日期筛选
-        if start:
-            df = df[df[COL_DATE] >= start]
-        if end:
-            df = df[df[COL_DATE] <= end]
         if df.empty:
             return None
 
@@ -164,6 +265,7 @@ class FactorEngine:
             warnings.warn(f"{symbol}/{factor_name} 计算失败: {e}")
             return None
 
+        factor_vals = factor_vals.copy()
         factor_vals.index = df[COL_DATE].values
         factor_vals.name  = symbol
         return factor_vals
@@ -176,7 +278,8 @@ class FactorEngine:
         start:       Optional[str] = None,
         end:         Optional[str] = None,
         symbols:     Optional[List[str]] = None,
-        n_jobs:      int = 1,
+        n_jobs:      int = 8,
+        fast_mode:   bool = True,
     ) -> pd.DataFrame:
         """
         批量计算所有股票的因子值，构建 (日期 × 股票) 面板。
@@ -186,20 +289,35 @@ class FactorEngine:
         factor_name : 因子名称（已注册）
         start / end : 日期范围（YYYYMMDD 字符串，含端点）
         symbols     : 指定股票列表（None = 全部）
-        n_jobs      : 暂支持 1（单进程），保留扩展接口
+        n_jobs      : 并行线程数（默认 8）
+        fast_mode   : True = 跳过 MAD Winsorize，速度 ~3x（默认）；
+                      False = 使用完整清洗（更准确，更慢）
 
         Returns
         -------
         pd.DataFrame，index = 交易日(str)，columns = ts_code，values = 因子值
         """
         targets = symbols or self.all_symbols()
-        series_list = []
+        series_list: List[pd.Series] = []
 
-        iterable = tqdm(targets, desc=f"计算 {factor_name}", disable=not self.verbose)
-        for sym in iterable:
-            s = self.compute_single(sym, factor_name, start=start, end=end)
-            if s is not None and not s.isna().all():
-                series_list.append(s)
+        pbar = tqdm(total=len(targets), desc=f"计算 {factor_name}", disable=not self.verbose)
+
+        def _compute(sym: str) -> Optional[pd.Series]:
+            return self.compute_single(sym, factor_name, start=start, end=end, fast_mode=fast_mode)
+
+        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+            future_to_sym = {executor.submit(_compute, sym): sym for sym in targets}
+            for future in as_completed(future_to_sym):
+                pbar.update(1)
+                try:
+                    s = future.result()
+                    if s is not None and not s.isna().all():
+                        series_list.append(s)
+                except Exception as e:
+                    sym = future_to_sym[future]
+                    warnings.warn(f"{sym}/{factor_name} 线程异常: {e}")
+
+        pbar.close()
 
         if not series_list:
             warnings.warn(f"因子 '{factor_name}' 无有效数据，返回空 DataFrame。")
@@ -213,10 +331,11 @@ class FactorEngine:
 
     def build_return_panel(
         self,
-        forward:  int = 1,
-        start:    Optional[str] = None,
-        end:      Optional[str] = None,
-        symbols:  Optional[List[str]] = None,
+        forward:    int = 1,
+        start:      Optional[str] = None,
+        end:        Optional[str] = None,
+        symbols:    Optional[List[str]] = None,
+        fast_mode:  bool = True,
     ) -> pd.DataFrame:
         """
         构建未来 forward 日收益率面板（用于 IC / 分层回测）。
@@ -228,7 +347,7 @@ class FactorEngine:
         # 临时注册收益率因子
         _name = f"__ret_{forward}__"
         self.register(_name, lambda df: df[COL_CLOSE].pct_change(forward).shift(-forward))
-        panel = self.build_panel(_name, start=start, end=end, symbols=symbols)
+        panel = self.build_panel(_name, start=start, end=end, symbols=symbols, fast_mode=fast_mode)
         del self._registry[_name]
         return panel
 

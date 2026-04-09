@@ -915,3 +915,268 @@ class TestFactorReport:
         sample_report.print_summary()
         out = capsys.readouterr().out
         assert "test_factor" in out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TestOptimizer  §2.4 因子组合与权重优化
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from factor_framework.optimizer import equal_weight, icir_weight, print_weights
+
+
+def _make_panel(dates, stocks, seed=0) -> pd.DataFrame:
+    """生成随机因子面板（日期 × 股票），内含少量 NaN。"""
+    rng = np.random.default_rng(seed)
+    data = rng.standard_normal((len(dates), len(stocks)))
+    df = pd.DataFrame(data, index=dates, columns=stocks)
+    # 随机置 NaN（约 5%）
+    mask = rng.random(df.shape) < 0.05
+    df[mask] = np.nan
+    return df
+
+
+@pytest.fixture
+def multi_panels():
+    """三个因子面板，日期×股票完全对齐。"""
+    dates  = pd.date_range("2020-01-01", periods=24, freq="ME")
+    stocks = [f"S{i:03d}" for i in range(50)]
+    return {
+        "F1": _make_panel(dates, stocks, seed=1),
+        "F2": _make_panel(dates, stocks, seed=2),
+        "F3": _make_panel(dates, stocks, seed=3),
+    }
+
+
+@pytest.fixture
+def ic_series_dict(multi_panels):
+    """每个因子伪造一条 IC 时间序列（与面板日期对齐）。"""
+    rng = np.random.default_rng(42)
+    result = {}
+    dates = list(multi_panels.values())[0].index
+    for name in multi_panels:
+        values = rng.standard_normal(len(dates)) * 0.05 + 0.04
+        result[name] = pd.Series(values, index=dates)
+    return result
+
+
+class TestOptimizerEqualWeight:
+    """等权组合（§2.4.1）"""
+
+    def test_returns_tuple(self, multi_panels):
+        out = equal_weight(multi_panels)
+        assert isinstance(out, tuple) and len(out) == 2
+
+    def test_composite_shape(self, multi_panels):
+        composite, _ = equal_weight(multi_panels)
+        first = list(multi_panels.values())[0]
+        assert composite.shape == first.shape
+
+    def test_weights_sum_to_one(self, multi_panels):
+        _, weights = equal_weight(multi_panels)
+        assert abs(sum(weights.values()) - 1.0) < 1e-9
+
+    def test_weights_equal(self, multi_panels):
+        _, weights = equal_weight(multi_panels)
+        vals = list(weights.values())
+        assert all(abs(v - vals[0]) < 1e-9 for v in vals)
+
+    def test_all_keys_present(self, multi_panels):
+        _, weights = equal_weight(multi_panels)
+        assert set(weights.keys()) == set(multi_panels.keys())
+
+    def test_single_factor(self):
+        """单因子等权 → 权重 = 1.0"""
+        dates  = pd.date_range("2020-01-01", periods=10, freq="ME")
+        stocks = ["A", "B", "C"]
+        panel  = {"only": _make_panel(dates, stocks)}
+        composite, weights = equal_weight(panel)
+        assert abs(weights["only"] - 1.0) < 1e-9
+
+    def test_composite_values_are_mean(self, multi_panels):
+        """无 NaN 时合成值应等于各因子平均值。"""
+        clean_panels = {k: v.fillna(0) for k, v in multi_panels.items()}
+        composite, _ = equal_weight(clean_panels)
+        expected = sum(clean_panels.values()) / len(clean_panels)
+        np.testing.assert_allclose(composite.values, expected.values, atol=1e-10)
+
+    def test_raises_on_empty_dict(self):
+        with pytest.raises((ValueError, KeyError, ZeroDivisionError)):
+            equal_weight({})
+
+    def test_composite_index_matches_input(self, multi_panels):
+        composite, _ = equal_weight(multi_panels)
+        ref_index = list(multi_panels.values())[0].index
+        assert composite.index.equals(ref_index)
+
+    def test_composite_columns_match_input(self, multi_panels):
+        composite, _ = equal_weight(multi_panels)
+        ref_cols = list(multi_panels.values())[0].columns
+        # 列应为公共子集
+        assert set(composite.columns).issubset(set(ref_cols))
+
+    def test_output_is_dataframe(self, multi_panels):
+        composite, _ = equal_weight(multi_panels)
+        assert isinstance(composite, pd.DataFrame)
+
+    def test_weights_are_float(self, multi_panels):
+        _, weights = equal_weight(multi_panels)
+        assert all(isinstance(v, float) for v in weights.values())
+
+    def test_misaligned_dates_intersect(self):
+        """日期范围不同的面板 → 取交集。"""
+        dates_a = pd.date_range("2020-01-01", periods=12, freq="ME")
+        dates_b = pd.date_range("2020-07-01", periods=12, freq="ME")
+        stocks = ["X", "Y"]
+        panels = {
+            "A": _make_panel(dates_a, stocks, seed=0),
+            "B": _make_panel(dates_b, stocks, seed=1),
+        }
+        composite, weights = equal_weight(panels)
+        common = dates_a.intersection(dates_b)
+        assert len(composite) == len(common)
+
+    def test_misaligned_stocks_intersect(self):
+        """股票集合不同的面板 → 取交集。"""
+        dates = pd.date_range("2020-01-01", periods=6, freq="ME")
+        panels = {
+            "A": _make_panel(dates, ["S1", "S2", "S3"], seed=0),
+            "B": _make_panel(dates, ["S2", "S3", "S4"], seed=1),
+        }
+        composite, _ = equal_weight(panels)
+        assert set(composite.columns) == {"S2", "S3"}
+
+
+class TestOptimizerICIRWeight:
+    """ICIR 加权（§2.4.2）"""
+
+    def test_returns_tuple(self, multi_panels, ic_series_dict):
+        out = icir_weight(multi_panels, ic_series_dict)
+        assert isinstance(out, tuple) and len(out) == 2
+
+    def test_composite_shape(self, multi_panels, ic_series_dict):
+        composite, _ = icir_weight(multi_panels, ic_series_dict)
+        first = list(multi_panels.values())[0]
+        assert composite.shape[1] == first.shape[1]
+
+    def test_weights_sum_to_one(self, multi_panels, ic_series_dict):
+        _, weights = icir_weight(multi_panels, ic_series_dict)
+        assert abs(sum(weights.values()) - 1.0) < 1e-9
+
+    def test_weights_nonnegative(self, multi_panels, ic_series_dict):
+        _, weights = icir_weight(multi_panels, ic_series_dict)
+        assert all(v >= 0 for v in weights.values())
+
+    def test_all_keys_present(self, multi_panels, ic_series_dict):
+        _, weights = icir_weight(multi_panels, ic_series_dict)
+        assert set(weights.keys()) == set(multi_panels.keys())
+
+    def test_output_is_dataframe(self, multi_panels, ic_series_dict):
+        composite, _ = icir_weight(multi_panels, ic_series_dict)
+        assert isinstance(composite, pd.DataFrame)
+
+    def test_window_param_accepted(self, multi_panels, ic_series_dict):
+        """window=6 が受け入れられる（クラッシュしない）"""
+        composite, weights = icir_weight(multi_panels, ic_series_dict, window=6)
+        assert abs(sum(weights.values()) - 1.0) < 1e-9
+
+    def test_window_none_full_sample(self, multi_panels, ic_series_dict):
+        """window=None → 全样本 ICIR。"""
+        composite, weights = icir_weight(multi_panels, ic_series_dict, window=None)
+        assert abs(sum(weights.values()) - 1.0) < 1e-9
+
+    def test_larger_icir_gets_larger_weight(self):
+        """ICIR 更大的因子应获得更大权重。"""
+        dates  = pd.date_range("2020-01-01", periods=24, freq="ME")
+        stocks = ["A", "B", "C"]
+        panels = {
+            "strong": _make_panel(dates, stocks, seed=0),
+            "weak":   _make_panel(dates, stocks, seed=1),
+        }
+        # strong 因子 IC 均值更高
+        ic_dict = {
+            "strong": pd.Series([0.10] * 24, index=dates),  # ICIR ≈ ∞ (no variance)
+            "weak":   pd.Series([0.01] * 24, index=dates),
+        }
+        # 给 strong 添加一点方差，但均值仍远大于 weak
+        rng = np.random.default_rng(7)
+        ic_dict["strong"] = pd.Series(
+            0.10 + rng.standard_normal(24) * 0.01, index=dates
+        )
+        ic_dict["weak"] = pd.Series(
+            0.01 + rng.standard_normal(24) * 0.01, index=dates
+        )
+        _, weights = icir_weight(panels, ic_dict, window=None)
+        assert weights["strong"] > weights["weak"]
+
+    def test_zero_icir_fallback_to_equal(self):
+        """若所有因子 ICIR=0，应回退到等权。"""
+        dates  = pd.date_range("2020-01-01", periods=12, freq="ME")
+        stocks = ["A", "B"]
+        panels = {
+            "F1": _make_panel(dates, stocks, seed=0),
+            "F2": _make_panel(dates, stocks, seed=1),
+        }
+        # 全零 IC → ICIR = 0
+        ic_dict = {
+            "F1": pd.Series([0.0] * 12, index=dates),
+            "F2": pd.Series([0.0] * 12, index=dates),
+        }
+        _, weights = icir_weight(panels, ic_dict, window=None)
+        assert abs(sum(weights.values()) - 1.0) < 1e-9
+        # 等权
+        assert abs(weights["F1"] - weights["F2"]) < 1e-9
+
+    def test_single_factor_weight_is_one(self, ic_series_dict):
+        """单因子时权重应为 1.0。"""
+        dates  = pd.date_range("2020-01-01", periods=24, freq="ME")
+        stocks = ["A", "B"]
+        panels = {"only": _make_panel(dates, stocks)}
+        ic_dict = {"only": ic_series_dict["F1"]}
+        _, weights = icir_weight(panels, ic_dict, window=None)
+        assert abs(weights["only"] - 1.0) < 1e-9
+
+
+class TestOptimizerPrintWeights:
+    """print_weights 输出烟雾测试"""
+
+    def test_no_crash_equal(self, capsys):
+        weights = {"F1": 0.5, "F2": 0.3, "F3": 0.2}
+        print_weights(weights, method="等权")
+        out = capsys.readouterr().out
+        assert "F1" in out
+
+    def test_no_crash_icir_with_dict(self, capsys):
+        weights = {"F1": 0.6, "F2": 0.4}
+        icir_d  = {"F1": 1.5, "F2": 0.8}
+        print_weights(weights, method="ICIR加权", icir_dict=icir_d)
+        out = capsys.readouterr().out
+        assert "F1" in out and "ICIR" in out
+
+    def test_sorted_descending(self, capsys):
+        """输出应按权重降序排列。"""
+        weights = {"A": 0.1, "B": 0.5, "C": 0.4}
+        print_weights(weights, method="等权")
+        out = capsys.readouterr().out
+        lines = [l for l in out.split("\n") if any(k in l for k in ["A", "B", "C"])]
+        # B 应在 A 之前
+        assert out.index("B") < out.index("A")
+
+    def test_bar_proportional(self, capsys):
+        """权重更大的因子条形图应更长（或相等）。"""
+        weights = {"High": 0.8, "Low": 0.2}
+        print_weights(weights, method="等权")
+        out = capsys.readouterr().out
+        lines = {
+            k: next((l for l in out.split("\n") if k in l), "")
+            for k in weights
+        }
+        assert lines["High"].count("█") >= lines["Low"].count("█")
+
+    def test_empty_weights(self, capsys):
+        """空字典时不崩溃。"""
+        print_weights({}, method="等权")
+        # 只要不抛异常即可
+
+    def test_returns_none(self):
+        assert print_weights({"X": 1.0}, method="等权") is None
+

@@ -51,6 +51,7 @@ from factor_framework.ic_analysis   import compute_ic, ic_stats, ic_decay, ic_si
 from factor_framework.backtest      import layer_backtest, long_short_stats, turnover_analysis
 from factor_framework.neutralize    import neutralize_regression, neutralize_industry_zscore
 from factor_framework.operators     import cs_rank, cs_zscore, cs_winsorize
+from factor_framework.optimizer     import equal_weight, icir_weight, print_weights
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -62,22 +63,24 @@ class FactorReport:
 
     def __init__(
         self,
-        factor_name:  str,
-        ic_series:    pd.Series,
-        ic_stats:     Dict,
-        ic_nw:        Dict,
-        ic_decay_df:  pd.DataFrame,
-        layer_ret:    pd.DataFrame,
-        ls_stats:     Dict,
-        turnover:     Dict,
-        factor_panel: pd.DataFrame,
-        return_panel: pd.DataFrame,
+        factor_name:       str,
+        ic_series:         pd.Series,
+        ic_stats:          Dict,
+        ic_nw:             Dict,
+        ic_decay_df:       pd.DataFrame,
+        layer_ret:         pd.DataFrame,
+        ls_stats:          Dict,
+        turnover:          Dict,
+        factor_panel:      pd.DataFrame,
+        return_panel:      pd.DataFrame,
+        composite_weights: Optional[Dict[str, float]] = None,
     ):
-        self.factor_name  = factor_name
-        self.ic_series    = ic_series
-        self.ic_stats_    = ic_stats
-        self.ic_nw        = ic_nw
-        self.ic_decay_df  = ic_decay_df
+        self.factor_name       = factor_name
+        self.ic_series         = ic_series
+        self.ic_stats_         = ic_stats
+        self.ic_nw             = ic_nw
+        self.ic_decay_df       = ic_decay_df
+        self.composite_weights = composite_weights  # 仅多因子合成时有值
         self.layer_ret    = layer_ret
         self.ls_stats     = ls_stats
         self.turnover     = turnover
@@ -92,6 +95,14 @@ class FactorReport:
         print(f"\n{sep}")
         print(f"  因子名称: {self.factor_name}")
         print(sep)
+
+        # ── 合成权重（多因子时显示）────────────────────────────────────────
+        if self.composite_weights:
+            print(f"\n【因子合成权重】")
+            for name, w in sorted(self.composite_weights.items(), key=lambda x: -x[1]):
+                bar = "█" * max(0, int(w * 40))
+                print(f"  {name:<28} {w:>6.2%}  {bar}")
+            print(f"  {'合计':<28} {sum(self.composite_weights.values()):>6.2%}")
 
         s = self.ic_stats_
         print(f"\n【IC 分析】")
@@ -154,6 +165,12 @@ class FactorReport:
         self.layer_ret.to_csv(out / "layer_returns.csv")
         self.ls_stats["nav"].to_csv(out / "nav.csv")
         self.factor_panel.to_csv(out / "factor_panel.csv")
+
+        # 合成权重（多因子时保存）
+        if self.composite_weights:
+            pd.Series(self.composite_weights, name="weight").to_csv(
+                out / "composite_weights.csv", header=True
+            )
 
         # 汇总指标
         summary = {**self.ic_stats_, **self.ic_nw,
@@ -300,6 +317,18 @@ class FactorPipeline:
             forward=forward, start=start, end=end, symbols=symbols
         )
 
+        # ── 截断尾部 NaN（因子期 shift(-forward) 导致最后 forward 行无效）──
+        valid_ret_idx = return_panel.dropna(how="all").index
+        n_dropped = len(return_panel) - len(valid_ret_idx)
+        if n_dropped > 0:
+            warnings.warn(
+                f"[尾部截断] return_panel 末尾 {n_dropped} 个交易日因 "
+                f"forward={forward} 天 shift 导致收益率全为 NaN，"
+                f"已同步截断 factor_panel 的对应行以避免无效计算。"
+            )
+            return_panel = return_panel.loc[valid_ret_idx]
+            factor_panel = factor_panel.reindex(valid_ret_idx)
+
         # ── 截面预处理 ──────────────────────────────────────────────────────
         print(f"\n[3/6] 截面预处理（winsorize={winsorize}, standardize={standardize}, neutralize={neutralize}）...")
 
@@ -392,3 +421,190 @@ class FactorPipeline:
                 warnings.warn(f"因子 '{name}' 检验失败: {e}")
                 rows.append({"factor": name})
         return pd.DataFrame(rows).set_index("factor")
+
+    # ── 多因子合成 ────────────────────────────────────────────────────────────
+
+    def run_composite(
+        self,
+        factor_names:      List[str],
+        method:            str = "equal",           # 'equal' | 'icir'
+        icir_window:       Optional[int] = 12,      # ICIR 滚动窗口（期数）
+        composite_name:    str = "composite",       # 合成因子名称（用于报告）
+        start:             Optional[str] = None,
+        end:               Optional[str] = None,
+        forward:           int = 21,
+        n_groups:          int = 5,
+        direction:         int = 1,
+        standardize:       Optional[str] = "rank",
+        neutralize:        bool = False,
+        winsorize:         bool = True,
+        ic_method:         str = "rank",
+        ic_forward_list:   List[int] = (1, 5, 10, 21, 60),
+        periods_per_year:  int = 252,
+        rf:                float = 0.0,
+        cost_per_side:     float = 0.002,
+        symbols:           Optional[List[str]] = None,
+    ) -> FactorReport:
+        """
+        多因子合成流程：先对各单因子分别构建面板并计算 IC，
+        再按指定方法合成为组合信号，最后执行完整的回测检验。
+
+        Parameters
+        ----------
+        factor_names   : 已注册的因子名称列表
+        method         : 合成方法
+                         'equal' — 等权组合（§2.4.1）
+                         'icir'  — ICIR 加权（§2.4.2）
+        icir_window    : ICIR 加权时的滚动窗口期数（None = 全样本）
+        composite_name : 合成因子在报告中的显示名称
+        其余参数       : 同 run() 方法
+
+        Returns
+        -------
+        FactorReport  包含合成因子的完整检验结果，
+                      report.composite_weights 存储各因子权重。
+        """
+        if not factor_names:
+            raise ValueError("factor_names 不能为空。")
+
+        method = method.lower().strip()
+        if method not in ("equal", "icir"):
+            raise ValueError(f"不支持的合成方法 '{method}'，请选择 'equal' 或 'icir'。")
+
+        # ── Step 1：逐因子构建面板 ───────────────────────────────────────────
+        print(f"\n{'='*60}")
+        print(f"  多因子合成流程  [{composite_name}]  方法={method}")
+        print(f"{'='*60}")
+
+        factor_panels:  Dict[str, pd.DataFrame] = {}
+        ic_series_dict: Dict[str, pd.Series]    = {}
+
+        for i, name in enumerate(factor_names, 1):
+            print(f"\n[因子 {i}/{len(factor_names)}] 构建面板: {name} ...")
+            raw_panel = self.engine.build_panel(
+                name, start=start, end=end, symbols=symbols
+            )
+            if raw_panel.empty:
+                warnings.warn(f"因子 '{name}' 面板为空，已跳过。")
+                continue
+
+            # 截面预处理（每个因子独立处理）
+            panel = raw_panel.copy()
+            if winsorize:
+                panel = self.engine.apply_cross_section(panel, cs_winsorize)
+            if neutralize and self.engine.industry_map is not None:
+                self.engine.register("__mktcap__", lambda df: df["总市值（万元）"])
+                mktcap_panel = self.engine.build_panel(
+                    "__mktcap__", start=start, end=end, symbols=symbols
+                )
+                del self.engine._registry["__mktcap__"]
+                panel = neutralize_regression(
+                    panel, mktcap_panel,
+                    industry_map=self.engine.industry_map,
+                )
+            if standardize == "rank":
+                panel = self.engine.apply_cross_section(panel, cs_rank)
+            elif standardize == "zscore":
+                panel = self.engine.apply_cross_section(panel, cs_zscore)
+
+            factor_panels[name] = panel
+
+        if not factor_panels:
+            raise ValueError("所有因子面板均为空，无法合成。")
+
+        # ── Step 2：构建收益率面板（公共一份）──────────────────────────────
+        print(f"\n构建收益率面板（forward={forward} 天）...")
+        return_panel = self.engine.build_return_panel(
+            forward=forward, start=start, end=end, symbols=symbols
+        )
+
+        # ── 截断尾部 NaN（与 run() 保持一致）─────────────────────────────
+        valid_ret_idx = return_panel.dropna(how="all").index
+        n_dropped = len(return_panel) - len(valid_ret_idx)
+        if n_dropped > 0:
+            warnings.warn(
+                f"[尾部截断] return_panel 末尾 {n_dropped} 个交易日因 "
+                f"forward={forward} 天 shift 导致收益率全为 NaN，"
+                f"已同步截断所有因子面板的对应行。"
+            )
+            return_panel  = return_panel.loc[valid_ret_idx]
+            factor_panels = {
+                name: panel.reindex(valid_ret_idx)
+                for name, panel in factor_panels.items()
+            }
+
+        # ── Step 3：逐因子计算 IC（ICIR 加权需要）──────────────────────────
+        if method == "icir":
+            print(f"\n计算各因子 IC（ICIR 滚动窗口={icir_window} 期）...")
+            for name, panel in factor_panels.items():
+                ic_series_dict[name] = compute_ic(panel, return_panel, method=ic_method)
+
+        # ── Step 4：合成因子 ─────────────────────────────────────────────────
+        print(f"\n合成因子（方法={method}）...")
+        if method == "equal":
+            composite_panel, weights = equal_weight(factor_panels)
+        else:  # icir
+            composite_panel, weights = icir_weight(
+                factor_panels,
+                ic_series_dict,
+                window=icir_window,
+            )
+
+        # 打印权重
+        icir_vals = None
+        if method == "icir" and ic_series_dict:
+            icir_vals = {}
+            for name, ic in ic_series_dict.items():
+                ic_clean = ic.dropna()
+                if icir_window is not None:
+                    ic_clean = ic_clean.iloc[-icir_window:] if len(ic_clean) >= icir_window else ic_clean
+                if len(ic_clean) >= 2:
+                    mean_ic = float(ic_clean.mean())
+                    std_ic  = float(ic_clean.std(ddof=1))
+                    icir_vals[name] = mean_ic / std_ic if std_ic > 0 else 0.0
+        print_weights(weights, method={"equal": "等权", "icir": "ICIR加权"}[method], icir_dict=icir_vals)
+
+        # ── Step 5：合成因子的 IC 分析 ────────────────────────────────────
+        print(f"计算合成因子 IC ...")
+        ic_series = compute_ic(composite_panel, return_panel, method=ic_method)
+        ic_s      = ic_stats(ic_series, annualize_periods=periods_per_year)
+        ic_nw     = ic_significance(ic_series, lags=max(1, int(len(ic_series) ** 0.25)))
+
+        # IC 衰减
+        self.engine.register("__close__", lambda df: df["收盘价"])
+        close_panel = self.engine.build_panel("__close__", start=start, end=end, symbols=symbols)
+        del self.engine._registry["__close__"]
+        ic_decay_df = ic_decay(composite_panel, close_panel,
+                               forward_periods=ic_forward_list, method=ic_method)
+
+        # ── Step 6：分层回测 ──────────────────────────────────────────────
+        print(f"分层回测（n_groups={n_groups}）...")
+        layer_ret = layer_backtest(
+            composite_panel, return_panel,
+            n_groups=n_groups, direction=direction
+        )
+        ls_stats_ = long_short_stats(layer_ret, periods_per_year=periods_per_year, rf=rf)
+
+        # ── Step 7：换手率 ────────────────────────────────────────────────
+        print(f"换手率分析 ...")
+        turnover_ = turnover_analysis(
+            composite_panel, n_groups=n_groups, direction=direction,
+            cost_per_side=cost_per_side
+        )
+
+        report = FactorReport(
+            factor_name        = composite_name,
+            ic_series          = ic_series,
+            ic_stats           = ic_s,
+            ic_nw              = ic_nw,
+            ic_decay_df        = ic_decay_df,
+            layer_ret          = layer_ret,
+            ls_stats           = ls_stats_,
+            turnover           = turnover_,
+            factor_panel       = composite_panel,
+            return_panel       = return_panel,
+            composite_weights  = weights,
+        )
+
+        print("\n✓ 多因子合成流程完成。")
+        return report

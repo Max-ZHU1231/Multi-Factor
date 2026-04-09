@@ -74,6 +74,32 @@ def mad_winsorize(series: pd.Series, k: float = MAD_THRESHOLD) -> pd.Series:
     return series.clip(lower=lower, upper=upper)
 
 
+def _try_winsorize(series: pd.Series, k: float = MAD_THRESHOLD):
+    """
+    合并"检查 + 执行"为一步（优化 4）：
+    一次计算 median/MAD，直接返回裁剪结果和是否发生变化的布尔值。
+    替代原来的 _has_outliers() + mad_winsorize() 两次调用（节省 ~2/3 中位数运算）。
+
+    Returns
+    -------
+    (clipped_series, changed: bool)
+    """
+    s = series.dropna()
+    if len(s) < 4:
+        return series, False
+
+    med = s.median()
+    mad = (s - med).abs().median()
+    if mad == 0:
+        return series, False
+
+    lower  = med - k * mad
+    upper  = med + k * mad
+    clipped = series.clip(lower=lower, upper=upper)
+    changed = not clipped.equals(series)
+    return clipped, changed
+
+
 def _has_outliers(series: pd.Series, k: float = MAD_THRESHOLD) -> bool:
     """检查 series 是否含有超出 MAD 边界的极值（清洗前调用）。"""
     s = series.dropna()
@@ -137,10 +163,8 @@ def clean_stock_df(
         #     直接以 MISSING_HEAVY 剔除整列。
         winsorized_this = False
         if col in VALUATION_COLS:
-            # 先 Winsorize 已有非空值，避免极值污染 ffill
-            if _has_outliers(df[col]):
-                df[col] = mad_winsorize(df[col])
-                winsorized_this = True
+            # 先 Winsorize 已有非空值，避免极值污染 ffill（一次计算）
+            df[col], winsorized_this = _try_winsorize(df[col])
             # PIT ffill（不限长度）
             df[col] = df[col].ffill()
             # ffill 后重算缺失率；若仍超 30%（列本身没有任何历史值），则无效
@@ -148,10 +172,9 @@ def clean_stock_df(
             if miss_rate_post > MISSING_HEAVY:
                 invalid_cols.append(col)
                 continue
-            # ffill 后做第二次 Winsorize（仅对新引入值做二次清洗）
-            if _has_outliers(df[col]):
-                df[col] = mad_winsorize(df[col])
-                winsorized_this = True
+            # ffill 后做第二次 Winsorize（一次计算）
+            df[col], w2 = _try_winsorize(df[col])
+            winsorized_this = winsorized_this or w2
             if winsorized_this:
                 winsorized_cols.append(col)
             continue  # 跳过下面的通用流程
@@ -162,9 +185,7 @@ def clean_stock_df(
             continue
 
         # 4b. 第一次 MAD Winsorize（先于填充，避免极值污染填充结果）
-        if _has_outliers(df[col]):
-            df[col] = mad_winsorize(df[col])
-            winsorized_this = True
+        df[col], winsorized_this = _try_winsorize(df[col])
 
         # 4c. 缺失值填充
         if col in PRICE_VOL_COLS:
@@ -176,9 +197,8 @@ def clean_stock_df(
                 df[col] = df[col].fillna(df[col].median())
 
         # 4d. 第二次 MAD Winsorize（填充后可能引入新极值，再清洗一次）
-        if _has_outliers(df[col]):
-            df[col] = mad_winsorize(df[col])
-            winsorized_this = True
+        df[col], w2 = _try_winsorize(df[col])
+        winsorized_this = winsorized_this or w2
 
         if winsorized_this:
             winsorized_cols.append(col)

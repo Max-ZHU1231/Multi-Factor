@@ -1,5 +1,7 @@
 # Multi-Factor 多因子选股研究框架
 
+> **最新版本（v2.4）**：新增因子组合优化器、全因子系统性分析脚本、四项性能优化及三处前瞻偏差 Bug 修复。
+
 A end-to-end quantitative research framework for Chinese A-share markets, covering data downloading, cleaning, quality checks, factor construction, IC analysis, and layer backtesting.
 
 ---
@@ -21,6 +23,10 @@ A end-to-end quantitative research framework for Chinese A-share markets, coveri
   - [分层回测](#36-分层回测--backtestpy)
   - [端到端 Pipeline](#37-端到端-pipeline--pipelinepy)
 - [快速上手](#快速上手)
+- [因子组合优化器](#因子组合优化器--24)
+- [全因子系统性分析](#全因子系统性分析--factor_analysispy)
+- [性能优化说明](#性能优化说明)
+- [前瞻偏差保护](#前瞻偏差保护)
 - [测试](#测试)
 - [文件索引](#文件索引)
 
@@ -46,17 +52,23 @@ Multi-Factor/
 │   └── factor_framework/
 │       ├── __init__.py                 # 包入口
 │       ├── operators.py                # 算子库（时间序列/横截面/数学/跨资产）
-│       ├── factor_engine.py            # FactorEngine：注册、计算、面板构建
-│       ├── factor_zoo.py               # 20 个内置预定义因子
+│       ├── factor_engine.py            # FactorEngine：注册、计算、面板构建（含 DataFrame 缓存）
+│       ├── factor_zoo.py               # 20 个内置预定义因子（含估值因子 lag_days 滞后）
 │       ├── neutralize.py               # 因子中性化（回归法/行业 Z-Score/正交化）
-│       ├── ic_analysis.py              # IC 分析（Rank IC/ICIR/衰减/Newey-West）
+│       ├── ic_analysis.py              # IC 分析（向量化 Rank IC/ICIR/衰减/Newey-West）
 │       ├── backtest.py                 # 分层回测（夏普/最大回撤/Calmar/换手率）
-│       └── pipeline.py                 # FactorPipeline 端到端流水线
+│       ├── pipeline.py                 # FactorPipeline 端到端流水线 + run_composite()
+│       └── optimizer.py               # §2.4 因子组合：equal_weight / icir_weight
+│
+├── 分析与基准
+│   ├── factor_analysis.py              # 全因子系统性分析（IC/分层/相关性/聚类）
+│   ├── smoke_test.py                   # 快速 3 因子冒烟测试
+│   └── bench.py                        # 性能基准测试
 │
 └── 测试
     ├── test_data_cleaner.py            # 262 个测试
     ├── test_data_quality.py            # 183 个测试
-    └── test_factor_framework.py        # 94 个测试（全部通过，共 539 个）
+    └── test_factor_framework.py        # 125 个测试（全部通过，共 570 个）
 ```
 
 ---
@@ -69,7 +81,7 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 
 # 安装依赖
-pip install pandas numpy scipy tqdm akshare pytest
+pip install pandas numpy scipy tqdm akshare pytest matplotlib
 ```
 
 **Python 版本**：3.10+（已在 3.13 上验证）
@@ -528,16 +540,163 @@ print(df.sort_values("icir", ascending=False))
 
 ---
 
+## 因子组合优化器 — §2.4
+
+`optimizer.py` 提供两种多因子合成权重方案，通过 `pipeline.run_composite()` 一键调用。
+
+### §2.4.1 等权合成
+
+```python
+from factor_framework.optimizer import equal_weight
+
+composite_panel, weights = equal_weight(
+    {"momentum_12_1": mom_panel, "vol_20d": vol_panel, "value_pb": pb_panel}
+)
+# weights = {"momentum_12_1": 0.333, "vol_20d": 0.333, "value_pb": 0.333}
+```
+
+### §2.4.2 ICIR 加权
+
+$$w_i = \frac{\text{ICIR}_i}{\sum_j |\text{ICIR}_j|}$$
+
+使用滚动窗口 ICIR 动态调整权重，自动将负 ICIR 因子权重归零。
+
+```python
+from factor_framework.optimizer import icir_weight
+
+composite_panel, weights = icir_weight(
+    factor_panels  = {"momentum_12_1": mom_panel, "vol_20d": vol_panel, "value_pb": pb_panel},
+    ic_series_dict = {"momentum_12_1": ic_mom, "vol_20d": ic_vol, "value_pb": ic_pb},
+    window         = 12,   # 滚动窗口长度（月）
+)
+```
+
+### 完整多因子流水线 `run_composite()`
+
+```python
+pipe = FactorPipeline("Stocks/", "股票列表-stock_basic.csv")
+pipe.register_builtins(["momentum_12_1", "vol_20d", "value_pb"])
+
+report = pipe.run_composite(
+    factor_names = ["momentum_12_1", "vol_20d", "value_pb"],
+    method       = "icir",        # "equal" 或 "icir"
+    icir_window  = 12,
+    start        = "20200101",
+    end          = "20251231",
+    forward      = 21,
+    n_groups     = 5,
+    standardize  = "rank",
+    neutralize   = False,
+)
+
+report.print_summary()    # 打印各因子权重 + 合成因子完整检验结果
+report.save("output/")    # 额外输出 composite_weights.csv
+```
+
+**`report.save()` 额外输出（多因子模式）：**
+```
+output/composite_icir/
+├── summary.csv
+├── ic_series.csv
+├── layer_returns.csv
+├── nav.csv
+└── composite_weights.csv   # 各因子最终 ICIR 加权权重
+```
+
+---
+
+## 全因子系统性分析 — `factor_analysis.py`
+
+对多个内置因子进行批量可视化分析，输出 7 类图表和统计 CSV 到 `output/factor_analysis/`。
+
+```powershell
+& ".venv\Scripts\python.exe" factor_analysis.py
+```
+
+**配置项（脚本顶部 `CFG` 字典）：**
+
+```python
+CFG = dict(
+    stocks_dir   = "stocks/",
+    start        = "20200101",
+    end          = "20251231",
+    forward      = 21,          # 预测期（交易日）
+    n_groups     = 5,           # 分层数
+    standardize  = "rank",
+    neutralize   = False,
+    ic_method    = "rank",
+    factors      = ["momentum_12_1", "vol_20d", "value_pb", ...],
+)
+```
+
+**输出内容：**
+
+| 编号 | 文件 | 说明 |
+|---|---|---|
+| 01 | `plots/01_ic_timeseries.png` | 各因子逐期 IC 折线图（含 6 月滚动均值） |
+| 02 | `plots/02_cumulative_ic.png` | 所有因子累积 IC 对比曲线 |
+| 03 | `ic_summary.csv` + `plots/03_ic_summary_heatmap.png` | IC 核心指标汇总热力图 |
+| 04 | `layer_stats/all_factors_ls.csv` + `plots/04_layer_nav/<因子>.png` | 各因子分层净值图 |
+| 05 | `factor_corr_matrix.csv` + `plots/05_factor_corr_heatmap.png` | 因子截面相关性热力图 |
+| 06 | `plots/06_cluster_dendrogram.png` | 因子聚类树状图（Ward 连接） |
+| 07 | `plots/07_cluster_heatmap.png` | 聚类排序后相关性热力图 |
+
+**快速冒烟测试（3 因子，1 年数据）：**
+
+```powershell
+& ".venv\Scripts\python.exe" smoke_test.py
+```
+
+---
+
+## 性能优化说明
+
+v2.4 针对以下四个瓶颈进行了优化：
+
+| 优化项 | 改动位置 | 效果 |
+|---|---|---|
+| **DataFrame 缓存**（跨因子复用，双重检查锁） | `factor_engine.py` | 5 因子批量：第 2+ 因子 ~2.5× 加速 |
+| **`compute_ic` 完全向量化** | `ic_analysis.py` | T=500, N=3000 下 **240 ms**（原 ~10–30 s，约 50× 加速） |
+| **`_try_winsorize` 合并检查+执行** | `data_cleaner.py` | 每列减少 2/3 的 median 计算 |
+| **`_fast_load` + ThreadPoolExecutor** | `factor_engine.py` | 初次批量读盘并发加载 |
+
+**实测基准（`bench.py`）：**
+```
+单因子首次运行：~73 s
+缓存命中再运行：~29 s（2.5×）
+5 因子批量平均：~30 s/因子
+compute_ic 向量化：~240 ms（T=500, N=3000）
+```
+
+手动释放缓存：
+```python
+engine.clear_cache()
+```
+
+---
+
+## 前瞻偏差保护
+
+v2.4 修复了三处前瞻偏差（look-ahead bias）问题：
+
+| 问题描述 | 修复位置 | 修复方式 |
+|---|---|---|
+| `run()` 中 `return_panel` 末尾 NaN 行被计入回测 | `pipeline.py` `run()` / `run_composite()` | `dropna(how="all")` 截断尾部 + `warnings.warn` 提示丢弃天数 |
+| `ic_decay()` 使用 `shift(-fwd)` 时引入未来价格 | `ic_analysis.py` `ic_decay()` | 入口自动截断 `price_panel` 末尾 `max(forward_periods)` 行 |
+| 估值因子（PB/PE/PS）使用当日财务数据（实际需滞后披露） | `factor_zoo.py` `value_pb` / `value_pe_ttm` / `value_ps_ttm` | 新增 `lag_days=20` 参数，默认滞后 20 个交易日 |
+
+---
+
 ## 测试
 
 ```powershell
 # 激活虚拟环境
 .venv\Scripts\Activate.ps1
 
-# 运行全部测试（539 个）
+# 运行全部测试（570 个）
 python -m pytest -v
 
-# 只运行因子框架测试
+# 只运行因子框架测试（含 optimizer）
 python -m pytest test_factor_framework.py -v
 
 # 只运行数据清洗测试
@@ -550,8 +709,8 @@ python -m pytest test_data_cleaner.py test_data_quality.py -v
 |---|---|---|
 | `test_data_cleaner.py` | 262 | ✅ 全部通过 |
 | `test_data_quality.py` | 183 | ✅ 全部通过 |
-| `test_factor_framework.py` | 94 | ✅ 全部通过 |
-| **合计** | **539** | ✅ |
+| `test_factor_framework.py` | 125 | ✅ 全部通过（含 31 个 optimizer 测试） |
+| **合计** | **570** | ✅ |
 
 ---
 
@@ -560,14 +719,18 @@ python -m pytest test_data_cleaner.py test_data_quality.py -v
 | 文件 | 职责 |
 |---|---|
 | `download_data.py` | AKShare 数据下载（量价 + 估值 + 财务） |
-| `data_cleaner.py` | MAD Winsorize + 5 规则缺失值处理 |
+| `data_cleaner.py` | MAD Winsorize + 5 规则缺失值处理（`_try_winsorize` 优化） |
 | `data_quality.py` | 价格连续性/停牌/财务等式/时区对齐检查 |
 | `factor_framework/operators.py` | ~30 个时序/横截面/数学算子 |
-| `factor_framework/factor_engine.py` | 因子注册 + 批量面板构建 |
-| `factor_framework/factor_zoo.py` | 20 个内置预定义因子 |
+| `factor_framework/factor_engine.py` | 因子注册 + 批量面板构建 + DataFrame 缓存（线程安全） |
+| `factor_framework/factor_zoo.py` | 20 个内置预定义因子（估值因子含 `lag_days` 保护） |
 | `factor_framework/neutralize.py` | 回归法/行业 Z-Score/正交化 |
-| `factor_framework/ic_analysis.py` | IC / ICIR / Newey-West / IC 衰减 |
+| `factor_framework/ic_analysis.py` | IC / ICIR / Newey-West / IC 衰减（向量化实现） |
 | `factor_framework/backtest.py` | 分层回测 + 夏普/回撤/Calmar + 换手率 |
-| `factor_framework/pipeline.py` | `FactorPipeline` 端到端流水线 + `FactorReport` |
+| `factor_framework/pipeline.py` | `FactorPipeline` 端到端流水线 + `run_composite()` + `FactorReport` |
+| `factor_framework/optimizer.py` | §2.4 因子组合：`equal_weight` / `icir_weight` / `print_weights` |
+| `factor_analysis.py` | 全因子系统性分析（IC/分层/相关性/聚类，输出 7 类图表） |
+| `smoke_test.py` | 快速 3 因子冒烟测试 |
+| `bench.py` | 性能基准测试（缓存/向量化 IC/Winsorize） |
 | `股票列表-stock_basic.csv` | 5490 只 A 股元数据（含行业字段） |
 | `Stocks/` | 单股日频 CSV（格式：`000001.SZ.csv`） |

@@ -206,7 +206,7 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-#  项目专用 
+#  锟斤拷目专锟斤拷 
 stocks/
 fundamentals/
 *.log
