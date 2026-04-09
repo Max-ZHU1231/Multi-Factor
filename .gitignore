@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# 数据文件（体积大，不推送原始CSV）
+stocks/
+fundamentals/
+
+# 日志
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
