@@ -128,6 +128,13 @@ class FactorEngine:
         # 缓存锁（ThreadPoolExecutor 下保证写安全）
         self._cache_lock = threading.Lock()
 
+        # ── 函数级编译缓存（层级 1/2 加速状态追踪）─────────────────────────
+        # 键：因子名称，值：{'target': str, 'compiled': bool}
+        # 作用：在 verbose 模式下展示每个因子使用的编译路径；
+        #       防止 Numba 函数在同一进程内重复触发 JIT 编译（Numba 内部有
+        #       自己的函数级缓存，此处仅作元数据层记录）。
+        self._compile_cache: Dict[str, dict] = {}
+
         self._load_meta()
 
     # ── 元数据 ────────────────────────────────────────────────────────────────
@@ -176,10 +183,51 @@ class FactorEngine:
         return list(self._registry.keys())
 
     def clear_cache(self) -> None:
-        """手动清空 DataFrame 缓存（释放内存）。"""
+        """手动清空 DataFrame 缓存和编译元数据缓存（释放内存）。"""
         with self._cache_lock:
             self._cache_fast.clear()
             self._cache_full.clear()
+            self._compile_cache.clear()
+
+    def _resolve_compile_target(self, name: str) -> str:
+        """
+        查询已注册因子的编译路径。
+
+        优先读取因子函数上的 ``_compile_target`` 属性；
+        对于 lambda 包装的因子，通过函数名模式匹配推断目标。
+
+        Returns
+        -------
+        'numba' | 'numexpr' | 'numpy' | 'pandas' | 'unknown'
+        """
+        if name in self._compile_cache:
+            return self._compile_cache[name]["target"]
+
+        fn = self._registry.get(name)
+        if fn is None:
+            return "unknown"
+
+        # 先检查函数本身的 _compile_target 属性（算子库中已标注）
+        if hasattr(fn, "_compile_target"):
+            target = fn._compile_target
+        else:
+            # 对于匿名 lambda / 用户自定义函数，标记为 'pandas'
+            target = "pandas"
+
+        self._compile_cache[name] = {"target": target}
+        return target
+
+    def compile_report(self) -> pd.DataFrame:
+        """
+        返回所有已注册因子的编译路径报告（DataFrame）。
+
+        Columns: factor_name, compile_target
+        """
+        rows = [
+            {"factor_name": n, "compile_target": self._resolve_compile_target(n)}
+            for n in self._registry
+        ]
+        return pd.DataFrame(rows)
 
     # ── 带缓存的数据加载（瓶颈 2 核心）─────────────────────────────────────
 
@@ -241,6 +289,9 @@ class FactorEngine:
         """
         if factor_name not in self._registry:
             raise KeyError(f"因子 '{factor_name}' 未注册，请先调用 register()。")
+
+        # 记录编译路径元数据（仅首次）
+        self._resolve_compile_target(factor_name)
 
         # 从缓存获取（不再每次重复读盘）
         df = self._load_df(symbol, fast_mode)

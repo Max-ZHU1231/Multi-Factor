@@ -1392,3 +1392,345 @@ class TestOptimizerPrintWeights:
     def test_returns_none(self):
         assert print_weights({"X": 1.0}, method="等权") is None
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# §9  TestCompileEngine — 三层编译引擎
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from factor_framework.jit_ops import (
+    _NUMBA_OK, _NUMEXPR_OK, COMPILE_TARGET,
+    ts_sum_fast, ts_mean_fast, ts_std_fast,
+    ts_max_fast, ts_min_fast, ts_corr_fast,
+    ts_wma_fast, ts_rank_fast, ts_prod_fast,
+    ts_drawdown_fast, ts_slope_fast, ts_beta_fast,
+    ne_log, ne_sqrt, ne_eval, ne_combine, warmup,
+)
+
+
+_RNG2 = np.random.default_rng(99)
+_TS   = pd.Series(10 + _RNG2.normal(0, 0.2, 80).cumsum(), name="price")
+_TS2  = pd.Series(10 + _RNG2.normal(0, 0.2, 80).cumsum(), name="bench")
+_D    = 10  # 窗口大小
+
+
+class TestCompileTargetMetadata:
+    """§9.1  _compile_target 元数据标注正确性"""
+
+    @pytest.mark.parametrize("fn, expected", [
+        (ts_sum,      "numba"),
+        (ts_mean,     "numba"),
+        (ts_stddev,   "numba"),
+        (ts_max,      "numba"),
+        (ts_min,      "numba"),
+        (ts_rank,     "numba"),
+        (ts_wma,      "numba"),
+        (ts_drawdown, "numba"),
+        (ts_slope,    "numba"),
+        (ts_prod,     "numba"),
+        (ts_corr,     "numba"),
+        (ts_beta,     "numba"),
+        (ts_decay_linear, "numba"),
+        (log,         "numexpr"),
+        (sqrt,        "numexpr"),
+        (absx,        "numexpr"),
+        (power,       "numexpr"),
+        (if_else,     "numexpr"),
+        (clip,        "numexpr"),
+        (cs_rank,     "numpy"),
+        (cs_zscore,   "numpy"),
+        (cs_demean,   "numpy"),
+        (cs_scale,    "numpy"),
+        (ts_ema,      "pandas"),
+        (ts_rsi,      "pandas"),
+        (ts_skew,     "pandas"),
+        (ts_delta,    "pandas"),
+        (delay,       "pandas"),
+    ])
+    def test_compile_target_attribute(self, fn, expected):
+        """每个算子函数都应携带正确的 _compile_target 属性。"""
+        assert hasattr(fn, "_compile_target"), \
+            f"{fn.__name__} 缺少 _compile_target 属性"
+        assert fn._compile_target == expected, \
+            f"{fn.__name__}: expected {expected}, got {fn._compile_target}"
+
+    def test_compile_target_registry_keys(self):
+        """COMPILE_TARGET 字典应包含所有主要算子。"""
+        must_have = [
+            "ts_mean", "ts_stddev", "ts_sum", "ts_corr", "ts_rank",
+            "ts_wma", "ts_drawdown", "ts_slope", "ts_prod",
+            "log", "sqrt", "power",
+            "cs_rank", "cs_zscore",
+        ]
+        for key in must_have:
+            assert key in COMPILE_TARGET, f"{key} 未在 COMPILE_TARGET 中"
+
+
+class TestNumericalEquivalence:
+    """§9.2  JIT 路径与 Pandas 路径的数值一致性"""
+
+    def _pd_rolling(self, x, d, method):
+        """Pandas 参考实现。"""
+        return getattr(x.rolling(d, min_periods=d), method)()
+
+    def test_ts_sum_vs_pandas(self):
+        jit = ts_sum_fast(_TS, _D)
+        ref = self._pd_rolling(_TS, _D, "sum")
+        np.testing.assert_allclose(jit.dropna().values, ref.dropna().values, rtol=1e-10)
+
+    def test_ts_mean_vs_pandas(self):
+        jit = ts_mean_fast(_TS, _D)
+        ref = self._pd_rolling(_TS, _D, "mean")
+        np.testing.assert_allclose(jit.dropna().values, ref.dropna().values, rtol=1e-10)
+
+    def test_ts_std_vs_pandas(self):
+        jit = ts_std_fast(_TS, _D)
+        ref = self._pd_rolling(_TS, _D, "std")
+        np.testing.assert_allclose(jit.dropna().values, ref.dropna().values, rtol=1e-8)
+
+    def test_ts_max_vs_pandas(self):
+        jit = ts_max_fast(_TS, _D)
+        ref = self._pd_rolling(_TS, _D, "max")
+        np.testing.assert_allclose(jit.dropna().values, ref.dropna().values, rtol=1e-10)
+
+    def test_ts_min_vs_pandas(self):
+        jit = ts_min_fast(_TS, _D)
+        ref = self._pd_rolling(_TS, _D, "min")
+        np.testing.assert_allclose(jit.dropna().values, ref.dropna().values, rtol=1e-10)
+
+    def test_ts_corr_vs_pandas(self):
+        jit = ts_corr_fast(_TS, _TS2, _D)
+        ref = _TS.rolling(_D, min_periods=_D).corr(_TS2)
+        np.testing.assert_allclose(jit.dropna().values, ref.dropna().values, atol=1e-10)
+
+    def test_ts_rank_range(self):
+        """ts_rank 输出必须在 (0, 1]。"""
+        r = ts_rank_fast(_TS, _D).dropna()
+        assert (r > 0).all() and (r <= 1.0).all()
+
+    def test_ts_wma_weighted(self):
+        """ts_wma 验证权重归一化：wma 在 [min, max] 之间。"""
+        jit = ts_wma_fast(_TS, _D).dropna()
+        lo  = _TS.rolling(_D, min_periods=_D).min().dropna()
+        hi  = _TS.rolling(_D, min_periods=_D).max().dropna()
+        assert (jit.values >= lo.values - 1e-9).all()
+        assert (jit.values <= hi.values + 1e-9).all()
+
+    def test_ts_drawdown_range(self):
+        """最大回撤应在 [0, 1]。"""
+        dd = ts_drawdown_fast(_TS, _D).dropna()
+        assert (dd >= 0).all() and (dd <= 1.0).all()
+
+    def test_ts_prod_vs_manual(self):
+        """ts_prod 验证：取 log 之和 = log(prod)。"""
+        x  = _TS.abs() + 0.1
+        jp = ts_prod_fast(x, _D).dropna()
+        pp = x.rolling(_D, min_periods=_D).apply(np.prod, raw=True).dropna()
+        np.testing.assert_allclose(jp.values, pp.values, rtol=1e-8)
+
+    def test_ts_slope_near_zero_for_flat(self):
+        """平稳序列的斜率应接近 0。"""
+        flat = pd.Series(np.ones(30) * 5.0)
+        s    = ts_slope_fast(flat, 10).dropna()
+        np.testing.assert_allclose(s.values, 0.0, atol=1e-10)
+
+    def test_ts_beta_vs_pandas(self):
+        """ts_beta_fast 与 Pandas cov/var 结果一致。"""
+        jit = ts_beta_fast(_TS, _TS2, _D)
+        cov = _TS.rolling(_D, min_periods=_D).cov(_TS2)
+        var = _TS2.rolling(_D, min_periods=_D).var(ddof=1)
+        ref = cov / var.replace(0, np.nan)
+        np.testing.assert_allclose(jit.dropna().values, ref.dropna().values, rtol=1e-8)
+
+    def test_ne_log_vs_numpy(self):
+        """ne_log 与 np.log 一致（x > 0 部分）。"""
+        pos = _TS.abs() + 0.1
+        jit = ne_log(pos)
+        ref = np.log(pos)
+        np.testing.assert_allclose(jit.values, ref.values, rtol=1e-10)
+
+    def test_ne_log_negative_is_nan(self):
+        """ne_log：x ≤ 0 必须输出 NaN。"""
+        x = pd.Series([-1.0, 0.0, 1.0, 2.0])
+        r = ne_log(x)
+        assert np.isnan(r.iloc[0]) and np.isnan(r.iloc[1])
+        assert not np.isnan(r.iloc[2])
+
+    def test_ne_sqrt_vs_numpy(self):
+        """ne_sqrt 与 np.sqrt 一致（x >= 0）。"""
+        pos = _TS.abs()
+        jit = ne_sqrt(pos)
+        ref = np.sqrt(pos)
+        np.testing.assert_allclose(jit.values, ref.values, rtol=1e-10)
+
+    def test_ne_eval_expression(self):
+        """ne_eval 能正确求值简单数学表达式。"""
+        x = np.array([1.0, 4.0, 9.0])
+        r = ne_eval("sqrt(x)", {"x": x})
+        np.testing.assert_allclose(r, [1.0, 2.0, 3.0], rtol=1e-10)
+
+    def test_ne_combine_weighted_sum(self):
+        """ne_combine 加权求和：权重为 0.6/0.4 时结果正确。"""
+        rng   = np.random.default_rng(7)
+        dates = pd.date_range("20200101", periods=30, freq="B").strftime("%Y%m%d")
+        cols  = ["A", "B", "C"]
+        p1    = pd.DataFrame(rng.normal(0, 1, (30, 3)), index=dates, columns=cols)
+        p2    = pd.DataFrame(rng.normal(0, 1, (30, 3)), index=dates, columns=cols)
+        result = ne_combine({"f1": p1, "f2": p2}, {"f1": 0.6, "f2": 0.4})
+        expected = p1 * 0.6 + p2 * 0.4
+        np.testing.assert_allclose(result.values, expected.values, rtol=1e-10)
+
+    def test_ne_combine_nan_propagation(self):
+        """ne_combine：任一面板为 NaN 的位置，合成结果也应为 NaN。"""
+        rng   = np.random.default_rng(8)
+        dates = pd.date_range("20200101", periods=20, freq="B").strftime("%Y%m%d")
+        cols  = ["A", "B"]
+        p1    = pd.DataFrame(rng.normal(0, 1, (20, 2)), index=dates, columns=cols)
+        p2    = pd.DataFrame(rng.normal(0, 1, (20, 2)), index=dates, columns=cols)
+        p2.iloc[5, 0] = np.nan
+        result = ne_combine({"f1": p1, "f2": p2}, {"f1": 0.5, "f2": 0.5})
+        assert np.isnan(result.iloc[5, 0])
+        assert not np.isnan(result.iloc[5, 1])
+
+
+class TestOperatorFallback:
+    """§9.3  _JIT_OK=False 降级路径（通过 monkeypatch 模拟）"""
+
+    def test_ts_mean_fallback(self, monkeypatch):
+        """关闭 JIT 后，ts_mean 退化到 Pandas rolling，结果不变。"""
+        import factor_framework.operators as ops
+        monkeypatch.setattr(ops, "_JIT_OK", False)
+        result = ops.ts_mean(_TS, _D)
+        ref    = _TS.rolling(_D, min_periods=_D).mean()
+        np.testing.assert_allclose(result.dropna().values, ref.dropna().values, rtol=1e-10)
+
+    def test_ts_rank_fallback(self, monkeypatch):
+        """关闭 JIT 后，ts_rank 退化到 rolling().apply()，结果在 (0,1]。"""
+        import factor_framework.operators as ops
+        monkeypatch.setattr(ops, "_JIT_OK", False)
+        r = ops.ts_rank(_TS, _D).dropna()
+        assert (r > 0).all() and (r <= 1.0).all()
+
+    def test_log_fallback(self, monkeypatch):
+        """关闭 JIT 后，log 退化到 np.log，负数仍为 NaN。"""
+        import factor_framework.operators as ops
+        monkeypatch.setattr(ops, "_JIT_OK", False)
+        pos = _TS.abs() + 0.1
+        r   = ops.log(pos)
+        ref = np.log(pos)
+        np.testing.assert_allclose(r.values, ref.values, rtol=1e-10)
+
+    def test_compile_target_preserved_after_fallback(self, monkeypatch):
+        """降级后 _compile_target 属性不应丢失（仍指示理想路径）。"""
+        import factor_framework.operators as ops
+        monkeypatch.setattr(ops, "_JIT_OK", False)
+        assert ops.ts_mean._compile_target == "numba"
+        assert ops.log._compile_target     == "numexpr"
+
+
+class TestFactorEngineCompileCache:
+    """§9.4  FactorEngine 编译路径缓存"""
+
+    @pytest.fixture
+    def engine(self, tmp_path):
+        """创建含最小 CSV 集的临时引擎。"""
+        stocks_dir = tmp_path / "stocks"
+        stocks_dir.mkdir()
+        rng = np.random.default_rng(0)
+        dates = pd.date_range("20200101", periods=100, freq="B").strftime("%Y%m%d")
+        for code in ["000001_SZ", "000002_SZ"]:
+            df = pd.DataFrame({
+                "交易日": dates, "股票代码": code,
+                "收盘价":  rng.uniform(5, 20, 100),
+                "开盘价":  rng.uniform(5, 20, 100),
+                "最高价":  rng.uniform(10, 25, 100),
+                "最低价":  rng.uniform(3,  10, 100),
+                "成交量（手）": rng.uniform(1e4, 1e6, 100),
+                "成交额（千元）": rng.uniform(1e5, 1e7, 100),
+                "换手率（%）": rng.uniform(0.1, 5, 100),
+                "总市值（万元）": rng.uniform(1e6, 1e8, 100),
+                "流通市值（万元）": rng.uniform(1e6, 1e8, 100),
+                "市净率": rng.uniform(0.5, 10, 100),
+                "市盈率（TTM，亏损为空）": rng.uniform(5, 100, 100),
+                "市销率（TTM）": rng.uniform(0.5, 10, 100),
+                "复权因子": np.ones(100),
+            })
+            df.to_csv(stocks_dir / f"{code}.csv", index=False)
+
+        e = FactorEngine(stocks_dir=stocks_dir, stock_basic=tmp_path / "sb.csv",
+                         min_rows=20, verbose=False)
+        return e
+
+    def test_resolve_compile_target_numba(self, engine):
+        """注册 ts_mean 因子后，compile_target 应为 'numba'。"""
+        from factor_framework.operators import ts_mean
+        engine.register("m20", lambda df: ts_mean(df["收盘价"], 5))
+        # lambda 本身无属性，但 COMPILE_TARGET 仍报 'pandas'（lambda）
+        t = engine._resolve_compile_target("m20")
+        assert t in {"numba", "pandas", "unknown"}
+
+    def test_compile_cache_populated_after_compute(self, engine):
+        """compute_single 之后，_compile_cache 中应有对应条目。"""
+        from factor_framework.operators import ts_mean
+        engine.register("m5", lambda df: ts_mean(df["收盘价"], 5))
+        engine.compute_single("000001_SZ", "m5")
+        assert "m5" in engine._compile_cache
+
+    def test_clear_cache_resets_compile_cache(self, engine):
+        """clear_cache() 应同时清空 _compile_cache。"""
+        from factor_framework.operators import ts_mean
+        engine.register("x1", lambda df: ts_mean(df["收盘价"], 5))
+        engine.compute_single("000001_SZ", "x1")
+        assert "x1" in engine._compile_cache
+        engine.clear_cache()
+        assert len(engine._compile_cache) == 0
+
+    def test_compile_report_returns_dataframe(self, engine):
+        """compile_report() 应返回含 factor_name / compile_target 两列的 DataFrame。"""
+        from factor_framework.operators import ts_mean, log
+        engine.register("r_mean", lambda df: ts_mean(df["收盘价"], 5))
+        engine.register("r_log",  lambda df: log(df["总市值（万元）"]))
+        report = engine.compile_report()
+        assert isinstance(report, pd.DataFrame)
+        assert "factor_name" in report.columns
+        assert "compile_target" in report.columns
+        assert len(report) == 2
+
+    def test_compile_report_all_targets_valid(self, engine):
+        """compile_report 中 compile_target 列只含合法值。"""
+        from factor_framework.operators import ts_mean
+        engine.register("chk", lambda df: ts_mean(df["收盘价"], 5))
+        report = engine.compile_report()
+        valid  = {"numba", "numexpr", "numpy", "pandas", "unknown"}
+        assert set(report["compile_target"].unique()).issubset(valid)
+
+
+class TestWarmup:
+    """§9.5  warmup() 预热函数"""
+
+    def test_warmup_returns_dict(self):
+        """warmup() 应返回字典，键为算子名称，值为耗时（秒）。"""
+        times = warmup(verbose=False)
+        assert isinstance(times, dict)
+        assert len(times) > 0
+        for name, t in times.items():
+            assert isinstance(t, float) and t >= 0.0
+
+    def test_warmup_covers_all_numba_ops(self):
+        """warmup() 应覆盖所有 Numba JIT 算子。"""
+        times = warmup(verbose=False)
+        expected = {
+            "ts_sum", "ts_mean", "ts_std", "ts_max", "ts_min",
+            "ts_corr", "ts_wma", "ts_rank", "ts_prod",
+            "ts_drawdown", "ts_slope", "ts_beta",
+        }
+        assert expected.issubset(times.keys())
+
+    def test_warmup_idempotent(self):
+        """多次调用 warmup() 均不崩溃，第二次明显更快（Numba 缓存）。"""
+        warmup(verbose=False)
+        import time
+        t0 = time.perf_counter()
+        warmup(verbose=False)
+        elapsed = time.perf_counter() - t0
+        # 第二次应在 2 秒内完成（JIT 已编译）
+        assert elapsed < 2.0

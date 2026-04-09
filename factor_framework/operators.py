@@ -6,6 +6,16 @@ operators.py
 所有时间序列算子作用于 pd.Series（单只股票历史序列）。
 所有横截面算子作用于 pd.Series（某截面日所有股票的因子值），index 为 ts_code。
 面板运算通过 factor_engine.apply_cross_section() 调度。
+
+编译策略（由 jit_ops 模块提供）
+--------------------------------
+每个算子函数携带 ``_compile_target`` 属性，标记其加速路径：
+  'numba'   → 层级 1：Numba JIT 滚动内核（最快，首次有编译延迟）
+  'numexpr' → 层级 2：Numexpr 逐元素向量化（约 2~4× vs NumPy）
+  'numpy'   → 层级 3：纯 NumPy/Pandas 向量化（已足够快）
+  'pandas'  → 层级 3：原生 Pandas API（兜底）
+
+Numba / Numexpr 不可用时，所有函数自动退化到 Pandas 路径，功能不变。
 """
 
 from __future__ import annotations
@@ -14,6 +24,22 @@ import numpy as np
 import pandas as pd
 from typing import Optional
 
+# 惰性导入加速后端（不可用时静默退化）
+try:
+    from factor_framework.jit_ops import (
+        ts_sum_fast, ts_mean_fast, ts_std_fast,
+        ts_max_fast, ts_min_fast, ts_corr_fast,
+        ts_wma_fast, ts_rank_fast, ts_prod_fast,
+        ts_drawdown_fast, ts_slope_fast, ts_beta_fast,
+        ne_log, ne_sqrt,
+        _NUMBA_OK, _NUMEXPR_OK,
+    )
+    _JIT_OK = True
+except Exception:
+    _JIT_OK    = False
+    _NUMBA_OK  = False
+    _NUMEXPR_OK = False
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2.2.1  时间序列算子（Time-Series Operators）
@@ -21,37 +47,63 @@ from typing import Optional
 
 def ts_sum(x: pd.Series, d: int) -> pd.Series:
     """过去 d 天 x 的滚动累加和。"""
+    if _JIT_OK:
+        return ts_sum_fast(x, d)
     return x.rolling(d, min_periods=d).sum()
+
+ts_sum._compile_target = "numba"
 
 
 def ts_mean(x: pd.Series, d: int) -> pd.Series:
     """过去 d 天 x 的滚动算术均值。"""
+    if _JIT_OK:
+        return ts_mean_fast(x, d)
     return x.rolling(d, min_periods=d).mean()
+
+ts_mean._compile_target = "numba"
 
 
 def ts_stddev(x: pd.Series, d: int) -> pd.Series:
     """过去 d 天 x 的滚动标准差（样本标准差，ddof=1）。"""
+    if _JIT_OK:
+        return ts_std_fast(x, d)
     return x.rolling(d, min_periods=d).std(ddof=1)
+
+ts_stddev._compile_target = "numba"
 
 
 def ts_corr(x: pd.Series, y: pd.Series, d: int) -> pd.Series:
     """过去 d 天 x 与 y 的滚动皮尔逊相关系数。"""
+    if _JIT_OK:
+        return ts_corr_fast(x, y, d)
     return x.rolling(d, min_periods=d).corr(y)
+
+ts_corr._compile_target = "numba"
 
 
 def delay(x: pd.Series, d: int) -> pd.Series:
     """x 向后平移 d 天（d 天前的值）。"""
     return x.shift(d)
 
+delay._compile_target = "pandas"
+
 
 def ts_max(x: pd.Series, d: int) -> pd.Series:
     """过去 d 天 x 的滚动最大值。"""
+    if _JIT_OK:
+        return ts_max_fast(x, d)
     return x.rolling(d, min_periods=d).max()
+
+ts_max._compile_target = "numba"
 
 
 def ts_min(x: pd.Series, d: int) -> pd.Series:
     """过去 d 天 x 的滚动最小值。"""
+    if _JIT_OK:
+        return ts_min_fast(x, d)
     return x.rolling(d, min_periods=d).min()
+
+ts_min._compile_target = "numba"
 
 
 def ts_rank(x: pd.Series, d: int) -> pd.Series:
@@ -59,6 +111,9 @@ def ts_rank(x: pd.Series, d: int) -> pd.Series:
     当日 x 在过去 d 天中的排名分位（0~1）。
     返回值为当日值在窗口内的百分比排名（1 = 最高）。
     """
+    if _JIT_OK:
+        return ts_rank_fast(x, d)
+
     def _rank_last(window: np.ndarray) -> float:
         if np.isnan(window).any():
             return np.nan
@@ -66,10 +121,14 @@ def ts_rank(x: pd.Series, d: int) -> pd.Series:
 
     return x.rolling(d, min_periods=d).apply(_rank_last, raw=True)
 
+ts_rank._compile_target = "numba"
+
 
 def ts_delta(x: pd.Series, d: int) -> pd.Series:
     """x 当日值 - d 天前的值（变化量）。"""
     return x - x.shift(d)
+
+ts_delta._compile_target = "pandas"
 
 
 def ts_wma(x: pd.Series, d: int) -> pd.Series:
@@ -77,6 +136,9 @@ def ts_wma(x: pd.Series, d: int) -> pd.Series:
     过去 d 天 x 的线性加权移动均值（近期权重更高）。
     权重为 1, 2, …, d（归一化后）。
     """
+    if _JIT_OK:
+        return ts_wma_fast(x, d)
+
     weights = np.arange(1, d + 1, dtype=float)
     weights /= weights.sum()
 
@@ -87,6 +149,8 @@ def ts_wma(x: pd.Series, d: int) -> pd.Series:
 
     return x.rolling(d, min_periods=d).apply(_wma, raw=True)
 
+ts_wma._compile_target = "numba"
+
 
 def ts_zscore(x: pd.Series, d: int) -> pd.Series:
     """过去 d 天 x 的滚动 Z-Score（(x - mean) / std）。"""
@@ -94,10 +158,14 @@ def ts_zscore(x: pd.Series, d: int) -> pd.Series:
     sig = ts_stddev(x, d)
     return (x - mu) / sig.replace(0, np.nan)
 
+ts_zscore._compile_target = "pandas"
+
 
 def ts_skew(x: pd.Series, d: int) -> pd.Series:
     """过去 d 天 x 的滚动偏度。"""
     return x.rolling(d, min_periods=d).skew()
+
+ts_skew._compile_target = "pandas"
 
 
 def ts_autocorr(x: pd.Series, d: int, lag: int = 1) -> pd.Series:
@@ -105,6 +173,8 @@ def ts_autocorr(x: pd.Series, d: int, lag: int = 1) -> pd.Series:
     return x.rolling(d, min_periods=d).apply(
         lambda w: pd.Series(w).autocorr(lag=lag), raw=False
     )
+
+ts_autocorr._compile_target = "pandas"
 
 
 def ts_ema(x: pd.Series, d: int) -> pd.Series:
@@ -116,6 +186,8 @@ def ts_ema(x: pd.Series, d: int) -> pd.Series:
     ema = x.ewm(span=d, min_periods=d, adjust=False).mean()
     return ema
 
+ts_ema._compile_target = "pandas"
+
 
 def ts_slope(x: pd.Series, d: int) -> pd.Series:
     """
@@ -123,6 +195,9 @@ def ts_slope(x: pd.Series, d: int) -> pd.Series:
     衡量序列在过去 d 天内的趋势方向与强度（如价格趋势、成交量趋势）。
     均值为 0 时直接返回原始斜率。
     """
+    if _JIT_OK:
+        return ts_slope_fast(x, d)
+
     t = np.arange(d, dtype=float)
     t -= t.mean()
     t_var = (t ** 2).sum()
@@ -136,6 +211,8 @@ def ts_slope(x: pd.Series, d: int) -> pd.Series:
         return slope / mean_abs if mean_abs > 1e-10 else slope
 
     return x.rolling(d, min_periods=d).apply(_slope, raw=True)
+
+ts_slope._compile_target = "numba"
 
 
 def ts_rsi(x: pd.Series, d: int) -> pd.Series:
@@ -155,6 +232,8 @@ def ts_rsi(x: pd.Series, d: int) -> pd.Series:
     rsi = 100.0 - 100.0 / (1.0 + rs)
     return rsi
 
+ts_rsi._compile_target = "pandas"
+
 
 def ts_drawdown(x: pd.Series, d: int) -> pd.Series:
     """
@@ -162,6 +241,9 @@ def ts_drawdown(x: pd.Series, d: int) -> pd.Series:
     定义：(peak - trough) / peak，值域 [0, 1]。
     通常取负值作为下行风险因子（越小越好）。
     """
+    if _JIT_OK:
+        return ts_drawdown_fast(x, d)
+
     def _mdd(w: np.ndarray) -> float:
         if np.isnan(w).any():
             return np.nan
@@ -171,6 +253,8 @@ def ts_drawdown(x: pd.Series, d: int) -> pd.Series:
 
     return x.rolling(d, min_periods=d).apply(_mdd, raw=True)
 
+ts_drawdown._compile_target = "numba"
+
 
 def ts_beta(x: pd.Series, y: pd.Series, d: int) -> pd.Series:
     """
@@ -178,9 +262,13 @@ def ts_beta(x: pd.Series, y: pd.Series, d: int) -> pd.Series:
         beta = cov(x, y) / var(y)
     常用于滚动市场 Beta 估计；y 通常为市场指数收益率。
     """
+    if _JIT_OK:
+        return ts_beta_fast(x, y, d)
     cov = x.rolling(d, min_periods=d).cov(y)
     var = y.rolling(d, min_periods=d).var(ddof=1)
     return cov / var.replace(0, np.nan)
+
+ts_beta._compile_target = "numba"
 
 
 def ts_regression_residual(x: pd.Series, y: pd.Series, d: int) -> pd.Series:
@@ -195,6 +283,8 @@ def ts_regression_residual(x: pd.Series, y: pd.Series, d: int) -> pd.Series:
     alpha = mu_x - beta * mu_y
     return x - alpha - beta * y
 
+ts_regression_residual._compile_target = "pandas"
+
 
 def ts_decay_linear(x: pd.Series, d: int) -> pd.Series:
     """
@@ -205,13 +295,19 @@ def ts_decay_linear(x: pd.Series, d: int) -> pd.Series:
     """
     return ts_wma(x, d)
 
+ts_decay_linear._compile_target = "numba"
+
 
 def ts_prod(x: pd.Series, d: int) -> pd.Series:
     """
     滚动连乘（d 天窗口）。适合收益率序列的累乘（复利增长）。
     例：ts_prod(1 + ret, 21) - 1 = 21 日复合收益率。
     """
+    if _JIT_OK:
+        return ts_prod_fast(x, d)
     return x.rolling(d, min_periods=d).apply(np.prod, raw=True)
+
+ts_prod._compile_target = "numba"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -226,6 +322,8 @@ def cs_rank(x: pd.Series) -> pd.Series:
     """
     return x.rank(pct=True)
 
+cs_rank._compile_target = "numpy"
+
 
 def cs_zscore(x: pd.Series) -> pd.Series:
     """(x - 均值) / 标准差，横截面标准化。"""
@@ -235,10 +333,14 @@ def cs_zscore(x: pd.Series) -> pd.Series:
         return pd.Series(np.nan, index=x.index)
     return (x - mu) / sig
 
+cs_zscore._compile_target = "numpy"
+
 
 def cs_demean(x: pd.Series) -> pd.Series:
     """x 减去截面均值。"""
     return x - x.mean()
+
+cs_demean._compile_target = "numpy"
 
 
 def cs_scale(x: pd.Series, a: float = 1.0) -> pd.Series:
@@ -247,6 +349,8 @@ def cs_scale(x: pd.Series, a: float = 1.0) -> pd.Series:
     if x_max == x_min:
         return pd.Series(a / 2, index=x.index)
     return (x - x_min) / (x_max - x_min) * a
+
+cs_scale._compile_target = "numpy"
 
 
 def cs_industry_neutral(x: pd.Series, group: pd.Series) -> pd.Series:
@@ -257,6 +361,8 @@ def cs_industry_neutral(x: pd.Series, group: pd.Series) -> pd.Series:
     group_mean = x.groupby(group).transform("mean")
     return x - group_mean
 
+cs_industry_neutral._compile_target = "numpy"
+
 
 def cs_industry_zscore(x: pd.Series, group: pd.Series) -> pd.Series:
     """在每个行业内对 x 做 Z-Score 标准化（简易行业中性化）。"""
@@ -266,6 +372,8 @@ def cs_industry_zscore(x: pd.Series, group: pd.Series) -> pd.Series:
             return s - s.mean()
         return (s - s.mean()) / sig
     return x.groupby(group).transform(_zscore)
+
+cs_industry_zscore._compile_target = "numpy"
 
 
 def cs_winsorize(x: pd.Series, n_std: float = 3.0) -> pd.Series:
@@ -281,6 +389,8 @@ def cs_winsorize(x: pd.Series, n_std: float = 3.0) -> pd.Series:
     upper = med + n_std * mad
     return x.clip(lower, upper)
 
+cs_winsorize._compile_target = "numpy"
+
 
 def cs_rank_by_group(x: pd.Series, group: pd.Series) -> pd.Series:
     """
@@ -294,6 +404,8 @@ def cs_rank_by_group(x: pd.Series, group: pd.Series) -> pd.Series:
     group : 行业标签 Series，index = ts_code
     """
     return x.groupby(group).rank(pct=True)
+
+cs_rank_by_group._compile_target = "numpy"
 
 
 def cs_neutralize(x: pd.Series, y: pd.Series) -> pd.Series:
@@ -322,6 +434,8 @@ def cs_neutralize(x: pd.Series, y: pd.Series) -> pd.Series:
     result.loc[df.index] = resid
     return result
 
+cs_neutralize._compile_target = "numpy"
+
 
 def cs_top_n(x: pd.Series, n: int) -> pd.Series:
     """
@@ -336,6 +450,8 @@ def cs_top_n(x: pd.Series, n: int) -> pd.Series:
     threshold = x.nlargest(n).min()
     return (x >= threshold) & x.notna()
 
+cs_top_n._compile_target = "numpy"
+
 
 def cs_quantile(x: pd.Series, q: float) -> float:
     """
@@ -348,6 +464,8 @@ def cs_quantile(x: pd.Series, q: float) -> float:
     """
     return float(x.dropna().quantile(q))
 
+cs_quantile._compile_target = "numpy"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2.2.3  数学与逻辑算子
@@ -355,22 +473,34 @@ def cs_quantile(x: pd.Series, q: float) -> float:
 
 def log(x: pd.Series) -> pd.Series:
     """自然对数（x > 0）。"""
+    if _JIT_OK:
+        return ne_log(x)
     return np.log(x.replace(0, np.nan))
+
+log._compile_target = "numexpr"
 
 
 def sqrt(x: pd.Series) -> pd.Series:
     """平方根（x >= 0）。"""
+    if _JIT_OK:
+        return ne_sqrt(x)
     return np.sqrt(x.clip(lower=0))
+
+sqrt._compile_target = "numexpr"
 
 
 def absx(x: pd.Series) -> pd.Series:
     """绝对值。"""
     return x.abs()
 
+absx._compile_target = "numexpr"
+
 
 def sign(x: pd.Series) -> pd.Series:
     """符号函数：+1 / 0 / -1。"""
     return np.sign(x)
+
+sign._compile_target = "numpy"
 
 
 def if_else(cond: pd.Series, a: pd.Series, b: pd.Series) -> pd.Series:
@@ -381,15 +511,21 @@ def if_else(cond: pd.Series, a: pd.Series, b: pd.Series) -> pd.Series:
         index=cond.index,
     )
 
+if_else._compile_target = "numexpr"
+
 
 def clip(x: pd.Series, lo: float, hi: float) -> pd.Series:
     """将 x 截断到 [lo, hi]。"""
     return x.clip(lower=lo, upper=hi)
 
+clip._compile_target = "numexpr"
+
 
 def power(x: pd.Series, n: float) -> pd.Series:
     """幂运算 x^n。"""
     return x ** n
+
+power._compile_target = "numexpr"
 
 
 def cs_min(x: pd.Series, y: pd.Series) -> pd.Series:
