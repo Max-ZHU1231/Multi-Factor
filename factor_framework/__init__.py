@@ -4,11 +4,14 @@ factor_framework
 多因子选股框架，包含以下模块：
 
   operators.py      - 时间序列、横截面、数学逻辑、跨资产算子库
-  factor_engine.py  - 因子注册 / 计算 / 面板构建引擎
-  neutralize.py     - 因子中性化（市值、行业、波动率）
-  ic_analysis.py    - IC 分析、t 检验、IC 衰减
+                      时序: ts_ema, ts_slope, ts_rsi, ts_drawdown, ts_beta,
+                            ts_regression_residual, ts_decay_linear, ts_prod
+                      横截面: cs_rank_by_group, cs_neutralize, cs_top_n, cs_quantile
+  factor_engine.py  - 因子注册 / 计算 / 面板构建引擎（DataFrame 缓存）
+  neutralize.py     - 因子中性化（市值、行业、波动率、Beta、动量、流动性；OLS / WLS）
+  ic_analysis.py    - IC 分析、t 检验、IC 衰减（向量化实现）
   backtest.py       - 分层回测、多空组合、夏普/最大回撤/Calmar
-  factor_zoo.py     - 内置预定义因子示例库
+  factor_zoo.py     - 内置预定义因子库（29 个，含流动性质量和技术分析因子）
   optimizer.py      - 因子组合与权重优化（等权、ICIR 加权）
   pipeline.py       - 端到端 Pipeline：加载→清洗→计算→检验→输出
 

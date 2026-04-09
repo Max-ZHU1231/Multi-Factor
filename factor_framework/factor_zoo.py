@@ -25,6 +25,7 @@ import pandas as pd
 from factor_framework.operators import (
     delay, ts_mean, ts_stddev, ts_sum, ts_corr,
     ts_max, ts_min, ts_rank, ts_delta, ts_wma,
+    ts_ema, ts_slope, ts_rsi,
     log, absx, sign, ts_zscore,
 )
 
@@ -251,30 +252,149 @@ def price_strength(df: pd.DataFrame, d: int = 20) -> pd.Series:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 流动性质量因子（Liquidity / Market-Microstructure）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def bid_ask_spread_proxy(df: pd.DataFrame, d: int = 21) -> pd.Series:
+    """
+    买卖价差隐性代理：(High - Low) / Close 的 d 日均值。
+    来源：Corwin & Schultz (2012) 的简化版 Kyle Lambda 近似。
+    值越大 → 隐性摩擦成本越高 → 流动性越差（负向因子）。
+    """
+    hl_ratio = (df[_H] - df[_L]) / df[_C].replace(0, np.nan)
+    return -ts_mean(hl_ratio, d)   # 取负：值越大流动性越好
+
+
+def zero_return_ratio(df: pd.DataFrame, d: int = 21) -> pd.Series:
+    """
+    零收益日占比（过去 d 天收益率 = 0 的天数 / d）。
+    来源：Lesmond, Ogden & Trzcinka (1999)。
+    值越高 → 股票越不活跃 → 流动性越差（负向因子）。
+    """
+    ret = _ret(df)
+    is_zero = (ret.abs() < 1e-8).astype(float)
+    return -ts_mean(is_zero, d)   # 取负：占比越高流动性越差
+
+
+def pastor_stambaugh(df: pd.DataFrame, d: int = 21) -> pd.Series:
+    """
+    Pastor-Stambaugh (2003) 流动性因子（简化版）：
+        收益率对 sign(ret_{t-1}) * volume_{t-1} * ret_{t-1} 做滚动回归的斜率。
+    斜率越负（绝对值越大）→ 价格冲击越大 → 流动性越差（取负后正向）。
+    使用 ts_corr 近似实现：corr(ret_t, signed_vol_{t-1})。
+    """
+    ret = _ret(df)
+    signed_vol = np.sign(ret.shift(1)) * df[_V].shift(1) * ret.shift(1)
+    # 相关系数负值越大说明价格冲击越明显；取负使其成为正向流动性代理
+    corr = ts_corr(ret, signed_vol, d)
+    return -corr
+
+
+def order_imbalance(df: pd.DataFrame, d: int = 21) -> pd.Series:
+    """
+    订单不平衡持续性：委比（买盘 / (买盘 + 卖盘)）的滚动均值。
+    使用价格变动方向近似委比：ret > 0 视为买压，ret < 0 视为卖压。
+        order_imbalance_proxy_t = (ret_t > 0) * 1 - (ret_t < 0) * 1  ∈ {-1, 0, 1}
+    正值 → 买压主导 → 正向动量信号。
+    """
+    ret = _ret(df)
+    buy_pressure = (ret > 0).astype(float) - (ret < 0).astype(float)
+    return ts_mean(buy_pressure, d)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 技术分析因子（Technical Analysis Factors）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def rsi_14(df: pd.DataFrame) -> pd.Series:
+    """
+    14 日 RSI（Relative Strength Index）。
+    值 > 70 超买（负向信号），值 < 30 超卖（正向信号）。
+    作为反转因子使用：返回 (50 - RSI) 使其与超卖正相关。
+    """
+    rsi = ts_rsi(df[_C], 14)
+    return 50.0 - rsi   # 超卖时值为正，超买时值为负
+
+
+def macd_signal(df: pd.DataFrame) -> pd.Series:
+    """
+    MACD 差值（DIF）：12 日 EMA - 26 日 EMA。
+    值为正 → 短期动量强于长期 → 动量正向信号。
+    """
+    ema12 = ts_ema(df[_C], 12)
+    ema26 = ts_ema(df[_C], 26)
+    dif   = ema12 - ema26
+    # 归一化：除以收盘价避免量纲差异
+    return dif / df[_C].replace(0, np.nan)
+
+
+def bb_position(df: pd.DataFrame, d: int = 20, n_std: float = 2.0) -> pd.Series:
+    """
+    布林带位置（Bollinger Band Position）：
+        BB% = (Close - Lower) / (Upper - Lower)
+    Upper = MA + n_std * σ，Lower = MA - n_std * σ。
+    值 ∈ [0, 1]；接近 1 → 接近上轨（超买），接近 0 → 接近下轨（超卖）。
+    作为反转因子：返回 (0.5 - BB%) 使超卖时为正值。
+    """
+    ma    = ts_mean(df[_C], d)
+    sigma = ts_stddev(df[_C], d)
+    upper = ma + n_std * sigma
+    lower = ma - n_std * sigma
+    band  = (upper - lower).replace(0, np.nan)
+    bb_pct = (df[_C] - lower) / band
+    return 0.5 - bb_pct   # 反转方向：超卖（低位）为正信号
+
+
+def volume_trend(df: pd.DataFrame, d: int = 20) -> pd.Series:
+    """
+    成交量趋势：对过去 d 日成交量做线性回归，返回归一化斜率。
+    斜率为正 → 量能放大 → 量价配合（配合动量使用）。
+    直接复用 ts_slope 算子。
+    """
+    return ts_slope(df[_V], d)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 因子注册辅助：一次性注册所有内置因子
 # ═══════════════════════════════════════════════════════════════════════════════
 
 BUILTIN_FACTORS = {
+    # 动量
     "momentum_12_1":     momentum_12_1,
     "momentum_6_1":      momentum_6_1,
     "momentum_1m":       momentum_1m,
     "momentum_52w_high": momentum_52w_high,
+    # 反转
     "reversal_1w":       reversal_1w,
     "reversal_1m":       reversal_1m,
+    # 波动率
     "vol_20d":           vol_20d,
     "vol_60d":           vol_60d,
     "vol_skew":          vol_skew,
     "downside_vol":      downside_vol,
+    # 估值
     "value_pb":          value_pb,
     "value_pe_ttm":      value_pe_ttm,
     "value_ps_ttm":      value_ps_ttm,
+    # 规模
     "size_log_mktcap":   size_log_mktcap,
     "size_log_free_cap": size_log_free_cap,
+    # 量价
     "amihud_illiquidity":amihud_illiquidity,
     "turnover_rate":     turnover_rate,
     "vol_price_corr":    vol_price_corr,
     "vwap_deviation":    vwap_deviation,
     "price_strength":    price_strength,
+    # 流动性质量
+    "bid_ask_spread_proxy": bid_ask_spread_proxy,
+    "zero_return_ratio":    zero_return_ratio,
+    "pastor_stambaugh":     pastor_stambaugh,
+    "order_imbalance":      order_imbalance,
+    # 技术分析
+    "rsi_14":            rsi_14,
+    "macd_signal":       macd_signal,
+    "bb_position":       bb_position,
+    "volume_trend":      volume_trend,
 }
 
 

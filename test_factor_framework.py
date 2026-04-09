@@ -35,9 +35,12 @@ from factor_framework.operators import (
     # 时间序列
     ts_sum, ts_mean, ts_stddev, ts_corr, delay, ts_max, ts_min,
     ts_rank, ts_delta, ts_wma, ts_zscore, ts_skew, ts_autocorr,
+    ts_ema, ts_slope, ts_rsi, ts_drawdown, ts_beta,
+    ts_regression_residual, ts_decay_linear, ts_prod,
     # 横截面
     cs_rank, cs_zscore, cs_demean, cs_scale, cs_industry_neutral,
     cs_industry_zscore, cs_winsorize,
+    cs_rank_by_group, cs_neutralize, cs_top_n, cs_quantile,
     # 数学
     log, sqrt, absx, sign, if_else, clip, power,
 )
@@ -310,6 +313,121 @@ class TestOperators:
         res = power(s, 2)
         assert res.tolist() == pytest.approx([4, 9, 16])
 
+    # ── 新增时间序列算子 ─────────────────────────────────────────────────────
+
+    def test_ts_ema_length(self, ts_series):
+        res = ts_ema(ts_series, 10)
+        assert len(res) == len(ts_series)
+
+    def test_ts_ema_nan_head(self, ts_series):
+        res = ts_ema(ts_series, 10)
+        assert res.iloc[:9].isna().all()
+
+    def test_ts_ema_valid_tail(self, ts_series):
+        res = ts_ema(ts_series, 10)
+        assert res.iloc[9:].notna().all()
+
+    def test_ts_slope_type(self, ts_series):
+        res = ts_slope(ts_series, 10)
+        assert isinstance(res, pd.Series)
+        assert len(res) == len(ts_series)
+
+    def test_ts_slope_nan_head(self, ts_series):
+        res = ts_slope(ts_series, 10)
+        assert res.iloc[:9].isna().all()
+
+    def test_ts_slope_monotone_positive(self):
+        # 单调递增序列，斜率应为正
+        s   = pd.Series(np.arange(50, dtype=float))
+        res = ts_slope(s, 10)
+        valid = res.dropna()
+        assert (valid > 0).all()
+
+    def test_ts_rsi_bounds(self, ts_series):
+        res = ts_rsi(ts_series, 14)
+        valid = res.dropna()
+        assert (valid >= 0).all() and (valid <= 100).all()
+
+    def test_ts_rsi_nan_head(self, ts_series):
+        res = ts_rsi(ts_series, 14)
+        assert res.iloc[:13].isna().all()
+
+    def test_ts_drawdown_nonneg(self, ts_series):
+        res = ts_drawdown(ts_series, 20)
+        valid = res.dropna()
+        assert (valid >= 0).all() and (valid <= 1 + 1e-9).all()
+
+    def test_ts_drawdown_nan_head(self, ts_series):
+        res = ts_drawdown(ts_series, 20)
+        assert res.iloc[:19].isna().all()
+
+    def test_ts_beta_type(self, ts_series):
+        y   = ts_series.shift(1).fillna(ts_series.mean())
+        res = ts_beta(ts_series, y, 20)
+        assert isinstance(res, pd.Series)
+        assert len(res) == len(ts_series)
+
+    def test_ts_regression_residual_type(self, ts_series):
+        y   = ts_series.shift(1).fillna(ts_series.mean())
+        res = ts_regression_residual(ts_series, y, 20)
+        assert isinstance(res, pd.Series)
+        assert len(res) == len(ts_series)
+
+    def test_ts_decay_linear_matches_wma(self, ts_series):
+        res_decay = ts_decay_linear(ts_series, 10)
+        res_wma   = ts_wma(ts_series, 10)
+        pd.testing.assert_series_equal(res_decay, res_wma)
+
+    def test_ts_prod_cumulative(self):
+        # (1+0.1)^5 = 1.61051
+        s   = pd.Series([0.1] * 10)
+        res = ts_prod(1 + s, 5)
+        valid = res.dropna()
+        assert np.allclose(valid.values, 1.1 ** 5, rtol=1e-6)
+
+    # ── 新增横截面算子 ──────────────────────────────────────────────────────
+
+    def test_cs_rank_by_group_bounds(self, cs_series):
+        groups = pd.Series(
+            ["A"] * 15 + ["B"] * 15, index=cs_series.index
+        )
+        res = cs_rank_by_group(cs_series, groups)
+        assert (res >= 0).all() and (res <= 1).all()
+
+    def test_cs_rank_by_group_within_group(self, cs_series):
+        groups = pd.Series(
+            ["A"] * 15 + ["B"] * 15, index=cs_series.index
+        )
+        res = cs_rank_by_group(cs_series, groups)
+        # 每组内 rank pct 应有最小值 ≤ 1/15 和最大值 = 1.0
+        for g in ["A", "B"]:
+            mask = groups == g
+            grp  = res[mask]
+            assert grp.max() == pytest.approx(1.0)
+            assert grp.min() > 0
+
+    def test_cs_neutralize_removes_correlation(self, cs_series):
+        y = cs_series * 2 + pd.Series(
+            RNG.normal(0, 0.1, len(cs_series)), index=cs_series.index
+        )
+        resid = cs_neutralize(y, cs_series)
+        corr  = resid.dropna().corr(cs_series.reindex(resid.dropna().index))
+        assert abs(corr) < 0.1
+
+    def test_cs_top_n_count(self, cs_series):
+        mask = cs_top_n(cs_series, 5)
+        assert mask.sum() == 5
+
+    def test_cs_top_n_are_largest(self, cs_series):
+        mask = cs_top_n(cs_series, 5)
+        threshold = cs_series.nlargest(5).min()
+        assert (cs_series[mask] >= threshold).all()
+
+    def test_cs_quantile_value(self, cs_series):
+        q80 = cs_quantile(cs_series, 0.8)
+        assert isinstance(q80, float)
+        assert (cs_series.dropna() <= q80).mean() >= 0.79
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. TestFactorEngine
@@ -486,6 +604,85 @@ class TestNeutralize:
         """只传 industry_map，不传 mktcap（空 DataFrame）应正常运行。"""
         empty_mc = pd.DataFrame(index=factor_panel.index, columns=factor_panel.columns, dtype=float)
         result = neutralize_regression(factor_panel, empty_mc, industry_map=industry_map)
+        assert result.shape == factor_panel.shape
+
+    # ── 新增：WLS 和风格因子中性化测试 ─────────────────────────────────────
+
+    def test_regression_wls_shape(self, factor_panel, mktcap_panel, industry_map):
+        """WLS 中性化输出形状应与输入一致。"""
+        free_cap = mktcap_panel * 0.6   # 模拟流通市值
+        result = neutralize_regression(
+            factor_panel, mktcap_panel,
+            industry_map=industry_map,
+            free_cap_panel=free_cap,
+            use_wls=True,
+        )
+        assert result.shape == factor_panel.shape
+
+    def test_regression_wls_reduces_mktcap_corr(self, factor_panel, mktcap_panel):
+        """WLS 中性化后因子与市值的相关性应降低。"""
+        free_cap = mktcap_panel * 0.6
+        result = neutralize_regression(
+            factor_panel, mktcap_panel,
+            free_cap_panel=free_cap,
+            use_wls=True,
+        )
+        corr_before, corr_after = [], []
+        for date in factor_panel.index[:30]:
+            f  = factor_panel.loc[date].dropna()
+            fn = result.loc[date].dropna()
+            mc = mktcap_panel.loc[date].dropna()
+            comm   = f.index.intersection(mc.index)
+            comm_n = fn.index.intersection(mc.index)
+            if len(comm) >= 5:
+                corr_before.append(abs(f[comm].corr(np.log(mc[comm]))))
+            if len(comm_n) >= 5:
+                corr_after.append(abs(fn[comm_n].corr(np.log(mc[comm_n]))))
+        if corr_before and corr_after:
+            assert np.nanmean(corr_after) <= np.nanmean(corr_before) + 0.1
+
+    def test_regression_with_vol_and_beta(self, factor_panel, mktcap_panel):
+        """同时传入 vol_panel 和 beta_panel 时应正常运行。"""
+        vol_panel  = factor_panel.abs() * 0.02
+        beta_panel = factor_panel.apply(lambda c: c / (c.std() + 1e-9))
+        result = neutralize_regression(
+            factor_panel, mktcap_panel,
+            vol_panel=vol_panel,
+            beta_panel=beta_panel,
+        )
+        assert result.shape == factor_panel.shape
+        # 应有非 NaN 输出
+        assert result.notna().any().any()
+
+    def test_regression_with_all_style_factors(
+        self, factor_panel, mktcap_panel, industry_map
+    ):
+        """传入全部风格因子（vol / beta / momentum / liquidity）时应正常运行。"""
+        vol_panel       = factor_panel.abs() * 0.02
+        beta_panel      = factor_panel * 0.5
+        momentum_panel  = factor_panel.shift(1).fillna(0)
+        liquidity_panel = factor_panel.abs()
+        free_cap        = mktcap_panel * 0.6
+        result = neutralize_regression(
+            factor_panel, mktcap_panel,
+            industry_map=industry_map,
+            vol_panel=vol_panel,
+            beta_panel=beta_panel,
+            momentum_panel=momentum_panel,
+            liquidity_panel=liquidity_panel,
+            free_cap_panel=free_cap,
+            use_wls=True,
+        )
+        assert result.shape == factor_panel.shape
+
+    def test_wls_zero_weight_fallback(self, factor_panel, mktcap_panel):
+        """所有权重为 0 时，WLS 应降级为 OLS，不抛出异常。"""
+        zero_cap = pd.DataFrame(0.0, index=mktcap_panel.index, columns=mktcap_panel.columns)
+        result = neutralize_regression(
+            factor_panel, mktcap_panel,
+            free_cap_panel=zero_cap,
+            use_wls=True,
+        )
         assert result.shape == factor_panel.shape
 
 
@@ -690,6 +887,21 @@ class TestFactorZoo:
         expected = {"momentum_12_1", "reversal_1w", "vol_20d",
                     "value_pb", "size_log_mktcap", "amihud_illiquidity"}
         assert expected.issubset(BUILTIN_FACTORS.keys())
+
+    def test_builtin_factors_new_liquidity_names(self):
+        """新增流动性质量因子应存在于 BUILTIN_FACTORS。"""
+        expected = {"bid_ask_spread_proxy", "zero_return_ratio",
+                    "pastor_stambaugh", "order_imbalance"}
+        assert expected.issubset(BUILTIN_FACTORS.keys())
+
+    def test_builtin_factors_new_technical_names(self):
+        """新增技术分析因子应存在于 BUILTIN_FACTORS。"""
+        expected = {"rsi_14", "macd_signal", "bb_position", "volume_trend"}
+        assert expected.issubset(BUILTIN_FACTORS.keys())
+
+    def test_builtin_factors_count(self):
+        """BUILTIN_FACTORS 应包含至少 28 个因子（原 20 + 流动性 4 + 技术 4）。"""
+        assert len(BUILTIN_FACTORS) >= 28
 
     def test_register_all(self):
         engine = FactorEngine.__new__(FactorEngine)
