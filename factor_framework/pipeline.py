@@ -280,10 +280,12 @@ class FactorPipeline:
     stock_basic  : 股票列表 CSV（含 ts_code, industry 列）
     min_rows     : 新股最少有效行数
     verbose      : 显示进度条
-    cache_dir    : 磁盘缓存目录（None = 不启用 L2 Parquet 缓存）
+    cache_dir    : 磁盘缓存目录（默认 "cache/"，None = 不启用 L2 Parquet 缓存）
                    指定后，计算超过 5 秒的面板将自动缓存到磁盘，
                    第二次运行直接从 Parquet 读取，大幅缩短耗时。
     min_calc_secs: L2 写入阈值（秒）；仅计算超过此时间的面板才写入磁盘
+    store        : DataStore 实例（可选）；传入后优先通过 DataStore 读取数据，
+                   默认自动构造 CSVDataStore(stocks_dir)
     """
 
     def __init__(
@@ -292,10 +294,19 @@ class FactorPipeline:
         stock_basic:   str | Path = "股票列表-stock_basic.csv",
         min_rows:      int = 60,
         verbose:       bool = True,
-        cache_dir:     Optional[str | Path] = None,
+        cache_dir:     Optional[str | Path] = "cache/",
         min_calc_secs: float = 5.0,
+        store=None,   # Optional[DataStore] — 避免循环导入，运行时检查
     ):
-        # ── 缓存层（可选）────────────────────────────────────────────────────
+        # ── DataStore（B2: 自动构造 CSVDataStore 或使用传入的 store）───────
+        if store is None:
+            try:
+                from factor_framework.data.store import CSVDataStore
+                store = CSVDataStore(stocks_dir=str(stocks_dir))
+            except Exception:
+                store = None   # 构造失败时降级为 None（向后兼容）
+
+        # ── 缓存层（B4: 默认 "cache/"，可传 None 禁用）──────────────────────
         _cache: Optional[CacheLayer] = None
         if cache_dir is not None:
             _cache = CacheLayer(
@@ -312,6 +323,7 @@ class FactorPipeline:
             cache       = _cache,
             min_rows    = min_rows,
             verbose     = verbose,
+            store       = store,
         )
 
         # ── 向后兼容：self.engine 指向底层 FactorEngine ──────────────────

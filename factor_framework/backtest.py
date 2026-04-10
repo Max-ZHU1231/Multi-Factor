@@ -92,6 +92,18 @@ def layer_backtest(
     向量化实现：对对齐后的矩阵用 np.argsort 一次性完成所有截面分组，
     避免逐日期 for 循环，在日期数 ≥ 100 时有显著加速（约 10–30x）。
     """
+    # ── B1: TimestampedPanel 语义守卫 ────────────────────────────────────────
+    try:
+        from factor_framework.core.panel import TimestampedPanel
+        if isinstance(factor_panel, TimestampedPanel) and isinstance(return_panel, TimestampedPanel):
+            factor_panel, return_panel = factor_panel.align_with(return_panel)
+        elif isinstance(factor_panel, TimestampedPanel):
+            factor_panel.assert_valid()
+        elif isinstance(return_panel, TimestampedPanel):
+            return_panel.assert_valid()
+    except ImportError:
+        pass
+
     group_names = [f"Q{i + 1}" for i in range(n_groups)]
     col_names   = group_names + ["LS"]
 

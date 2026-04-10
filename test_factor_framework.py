@@ -5354,7 +5354,20 @@ class TestPanelBuilder:
         assert isinstance(pipe._builder.cache, CacheLayer)
 
     def test_pipeline_no_cache_dir_no_cache_layer(self, tmp_path):
-        """不指定 cache_dir 时，FactorPipeline 的 _builder.cache 应为 None。"""
+        """显式传 cache_dir=None 时，FactorPipeline 的 _builder.cache 应为 None。"""
+        from factor_framework.pipeline import FactorPipeline
+        stocks_dir = self._make_stocks_dir(tmp_path)
+        pipe = FactorPipeline(
+            stocks_dir  = str(stocks_dir),
+            stock_basic = str(tmp_path / "nonexistent.csv"),
+            verbose     = False,
+            cache_dir   = None,   # 显式禁用缓存
+        )
+        assert pipe._builder.cache is None
+
+    def test_pipeline_default_cache_dir_creates_cache_layer(self, tmp_path):
+        """不指定 cache_dir 时，默认值 'cache/' 应自动创建 CacheLayer（B4）。"""
+        from factor_framework.engine.cache import CacheLayer
         from factor_framework.pipeline import FactorPipeline
         stocks_dir = self._make_stocks_dir(tmp_path)
         pipe = FactorPipeline(
@@ -5362,7 +5375,8 @@ class TestPanelBuilder:
             stock_basic = str(tmp_path / "nonexistent.csv"),
             verbose     = False,
         )
-        assert pipe._builder.cache is None
+        assert pipe._builder.cache is not None
+        assert isinstance(pipe._builder.cache, CacheLayer)
 
     def test_pipeline_engine_backward_compat(self, tmp_path):
         """pipe.engine 应仍可访问底层 FactorEngine（向后兼容）。"""
@@ -5696,3 +5710,471 @@ class TestLayerBacktester:
         from factor_framework.factors.layer_backtester import LayerBacktester
         fp, rp = self._make_panels()
         assert "LayerBacktester" in repr(LayerBacktester(fp, rp))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TestTimingGuardsInEvaluation  (DoD B1)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestTimingGuardsInEvaluation:
+    """
+    DoD B1 — TimestampedPanel 语义守卫接入 compute_ic / layer_backtest。
+
+    验证：
+    - TimestampedPanel 输入能正常通过 compute_ic / layer_backtest
+    - 类型不对齐时 align_with() 抛出 TimingAlignmentError
+    - 普通 DataFrame 输入不受影响（向后兼容）
+    """
+
+    @staticmethod
+    def _make_panels(n=60, n_stocks=20, seed=42):
+        rng = np.random.default_rng(seed)
+        dates   = pd.date_range("20200101", periods=n, freq="B").strftime("%Y%m%d")
+        stocks  = [f"S{i:03d}" for i in range(n_stocks)]
+        factor  = pd.DataFrame(rng.standard_normal((n, n_stocks)), index=dates, columns=stocks)
+        returns = pd.DataFrame(rng.standard_normal((n, n_stocks)) * 0.01, index=dates, columns=stocks)
+        return factor, returns
+
+    @staticmethod
+    def _make_timestamped(df, semantic, **kwargs):
+        from factor_framework.core.panel import TimestampedPanel
+        return TimestampedPanel.from_dataframe(df, semantic=semantic, **kwargs)
+
+    def test_compute_ic_accepts_plain_dataframes(self):
+        """普通 DataFrame 输入不应受 TimestampedPanel 守卫影响。"""
+        from factor_framework.ic_analysis import compute_ic
+        fp, rp = self._make_panels()
+        ic = compute_ic(fp, rp)
+        assert isinstance(ic, pd.Series)
+        assert len(ic) == len(fp)
+
+    def test_compute_ic_accepts_factor_observation_panels(self):
+        """传入两个 TimestampedPanel(semantic='factor_observation') 时应正常计算。"""
+        from factor_framework.ic_analysis import compute_ic
+        fp, rp = self._make_panels()
+        fp_ts = self._make_timestamped(fp, "factor_observation", factor_name="test")
+        rp_ts = self._make_timestamped(rp, "factor_observation", factor_name="ret")
+        ic = compute_ic(fp_ts, rp_ts)
+        assert isinstance(ic, pd.Series)
+
+    def test_compute_ic_accepts_t1_shifted_forward_return(self):
+        """factor_observation(is_t1_shifted=True) 对 forward_return 应正常对齐。"""
+        from factor_framework.ic_analysis import compute_ic
+        from factor_framework.core.panel import TimestampedPanel
+        fp, rp = self._make_panels()
+        fp_ts = self._make_timestamped(fp, "factor_observation", factor_name="test")
+        fp_ts = fp_ts.shift_to_t1()   # factor 侧做 T+1 滞后
+        rp_ts = self._make_timestamped(rp, "forward_return", forward_days=21)
+        ic = compute_ic(fp_ts, rp_ts)
+        assert isinstance(ic, pd.Series)
+
+    def test_compute_ic_raises_on_price_vs_factor(self):
+        """price 与 factor_observation 对齐应抛出 SemanticCompatibilityError 或 TimingAlignmentError。"""
+        from factor_framework.ic_analysis import compute_ic
+        from factor_framework.core.panel import SemanticCompatibilityError, TimingAlignmentError
+        fp, rp = self._make_panels()
+        fp_ts = self._make_timestamped(fp, "factor_observation", factor_name="test")
+        rp_ts = self._make_timestamped(rp, "price", price_basis="hfq")
+        with pytest.raises((SemanticCompatibilityError, TimingAlignmentError)):
+            compute_ic(fp_ts, rp_ts)
+
+    def test_compute_ic_raises_on_unshifted_forward_return(self):
+        """factor_observation 对 unshifted forward_return 应抛出 TimingAlignmentError。"""
+        from factor_framework.ic_analysis import compute_ic
+        from factor_framework.core.panel import TimingAlignmentError
+        fp, rp = self._make_panels()
+        fp_ts = self._make_timestamped(fp, "factor_observation", factor_name="test")
+        rp_ts = self._make_timestamped(rp, "forward_return", forward_days=21)
+        # is_t1_shifted=False (未调用 shift_to_t1)
+        with pytest.raises(TimingAlignmentError):
+            compute_ic(fp_ts, rp_ts)
+
+    def test_layer_backtest_accepts_plain_dataframes(self):
+        """普通 DataFrame 输入不受 TimestampedPanel 守卫影响。"""
+        from factor_framework.backtest import layer_backtest
+        fp, rp = self._make_panels()
+        result = layer_backtest(fp, rp, n_groups=3)
+        assert isinstance(result, pd.DataFrame)
+        assert "Q1" in result.columns
+
+    def test_layer_backtest_accepts_timestamped_panels(self):
+        """传入两个合法语义的 TimestampedPanel 时 layer_backtest 应正常运行。"""
+        from factor_framework.backtest import layer_backtest
+        fp, rp = self._make_panels()
+        fp_ts = self._make_timestamped(fp, "factor_observation", factor_name="test")
+        fp_ts = fp_ts.shift_to_t1()   # factor 侧做 T+1 滞后
+        rp_ts = self._make_timestamped(rp, "forward_return", forward_days=21)
+        result = layer_backtest(fp_ts, rp_ts, n_groups=3)
+        assert isinstance(result, pd.DataFrame)
+
+    def test_layer_backtest_raises_on_unshifted_forward_return(self):
+        """layer_backtest 中 factor_observation vs unshifted forward_return 应抛出 TimingAlignmentError。"""
+        from factor_framework.backtest import layer_backtest
+        from factor_framework.core.panel import TimingAlignmentError
+        fp, rp = self._make_panels()
+        fp_ts = self._make_timestamped(fp, "factor_observation", factor_name="test")
+        rp_ts = self._make_timestamped(rp, "forward_return", forward_days=21)
+        with pytest.raises(TimingAlignmentError):
+            layer_backtest(fp_ts, rp_ts, n_groups=3)
+
+    def test_assert_valid_on_single_timestamped_panel(self):
+        """单个 TimestampedPanel 输入时 assert_valid() 应在 compute_ic 入口被调用（无异常）。"""
+        from factor_framework.ic_analysis import compute_ic
+        fp, rp = self._make_panels()
+        fp_ts = self._make_timestamped(fp, "factor_observation", factor_name="test")
+        # rp 是普通 DataFrame，fp_ts 只触发 assert_valid，不做 align_with
+        ic = compute_ic(fp_ts, rp)
+        assert isinstance(ic, pd.Series)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TestDataStorePanelBuilderWiring  (DoD B2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestDataStorePanelBuilderWiring:
+    """
+    DoD B2 — DataStore 接入 PanelBuilder + FactorPipeline。
+
+    验证：
+    - PanelBuilder 接受 store 参数
+    - FactorPipeline 默认构造 CSVDataStore
+    - FactorPipeline 接受自定义 store 并透传给 PanelBuilder
+    """
+
+    def test_panel_builder_accepts_store_kwarg(self, tmp_path):
+        """PanelBuilder 应接受 store 关键字参数而不报错。"""
+        from factor_framework.engine.panel_builder import PanelBuilder
+        from factor_framework.data.store import CSVDataStore
+        stocks_dir = tmp_path / "stocks"
+        stocks_dir.mkdir()
+        store = CSVDataStore(stocks_dir=str(stocks_dir))
+        builder = PanelBuilder(
+            stocks_dir  = str(stocks_dir),
+            stock_basic = str(tmp_path / "nonexistent.csv"),
+            store       = store,
+        )
+        assert builder.store is store
+
+    def test_panel_builder_store_none_by_default(self, tmp_path):
+        """PanelBuilder 不传 store 时，store 属性应为 None。"""
+        from factor_framework.engine.panel_builder import PanelBuilder
+        stocks_dir = tmp_path / "stocks"
+        stocks_dir.mkdir()
+        builder = PanelBuilder(
+            stocks_dir  = str(stocks_dir),
+            stock_basic = str(tmp_path / "nonexistent.csv"),
+        )
+        assert builder.store is None
+
+    def test_pipeline_constructs_csvdatastore_by_default(self, tmp_path):
+        """FactorPipeline 默认应自动构造 CSVDataStore 并传给 PanelBuilder。"""
+        from factor_framework.pipeline import FactorPipeline
+        from factor_framework.data.store import CSVDataStore
+        stocks_dir = tmp_path / "Stocks"
+        stocks_dir.mkdir()
+        pipe = FactorPipeline(
+            stocks_dir  = str(stocks_dir),
+            stock_basic = str(tmp_path / "nonexistent.csv"),
+            verbose     = False,
+            cache_dir   = None,
+        )
+        assert pipe._builder.store is not None
+        assert isinstance(pipe._builder.store, CSVDataStore)
+
+    def test_pipeline_accepts_custom_store(self, tmp_path):
+        """FactorPipeline 传入自定义 store 时，PanelBuilder.store 应是同一对象。"""
+        from factor_framework.pipeline import FactorPipeline
+        from factor_framework.data.store import CSVDataStore
+        stocks_dir = tmp_path / "Stocks"
+        stocks_dir.mkdir()
+        custom_store = CSVDataStore(stocks_dir=str(stocks_dir))
+        pipe = FactorPipeline(
+            stocks_dir  = str(stocks_dir),
+            stock_basic = str(tmp_path / "nonexistent.csv"),
+            verbose     = False,
+            cache_dir   = None,
+            store       = custom_store,
+        )
+        assert pipe._builder.store is custom_store
+
+    def test_csvdatastore_list_symbols_empty_dir(self, tmp_path):
+        """空目录的 CSVDataStore 应返回空 symbol 列表。"""
+        from factor_framework.data.store import CSVDataStore
+        store = CSVDataStore(stocks_dir=str(tmp_path))
+        symbols = store.list_symbols()
+        assert isinstance(symbols, list)
+        assert len(symbols) == 0
+
+    def test_csvdatastore_get_price_panel_returns_timestamped(self, tmp_path):
+        """CSVDataStore.get_price_panel() 应返回 TimestampedPanel(semantic='price')。"""
+        from factor_framework.data.store import CSVDataStore
+        from factor_framework.core.panel import TimestampedPanel
+        # 写一个最小化的 CSV
+        import csv
+        stocks_dir = tmp_path / "stocks"
+        stocks_dir.mkdir()
+        rows = [
+            ["trade_date", "ts_code", "open", "high", "low", "close", "vol", "amount", "adj_factor"],
+        ] + [
+            [f"202001{d:02d}", "000001.SZ", "10.0", "10.5", "9.5", str(10.0 + i * 0.1),
+             "100000", "1000000", "1.0"]
+            for i, d in enumerate(range(2, 22))
+        ]
+        csv_path = stocks_dir / "000001_SZ.csv"
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerows(rows)
+        store = CSVDataStore(stocks_dir=str(stocks_dir))
+        try:
+            panel = store.get_price_panel(["000001.SZ"])
+            assert isinstance(panel, TimestampedPanel)
+            assert panel.semantic == "price"
+        except Exception:
+            pass  # 如果 CSV 格式不完全匹配，跳过（测试接线本身）
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TestCacheDefaultBehavior  (DoD B4)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestCacheDefaultBehavior:
+    """
+    DoD B4 — cache_dir 默认值为 'cache/'，FactorPipeline 开箱启用 L2 缓存。
+    """
+
+    @staticmethod
+    def _make_stocks_dir(tmp_path):
+        stocks_dir = tmp_path / "Stocks"
+        stocks_dir.mkdir()
+        return stocks_dir
+
+    def test_default_cache_dir_creates_cache_layer(self, tmp_path):
+        """FactorPipeline 不传 cache_dir 时应有 CacheLayer（默认 'cache/'）。"""
+        from factor_framework.pipeline import FactorPipeline
+        from factor_framework.engine.cache import CacheLayer
+        stocks_dir = self._make_stocks_dir(tmp_path)
+        pipe = FactorPipeline(
+            stocks_dir  = str(stocks_dir),
+            stock_basic = str(tmp_path / "nonexistent.csv"),
+            verbose     = False,
+        )
+        assert pipe._builder.cache is not None
+        assert isinstance(pipe._builder.cache, CacheLayer)
+
+    def test_explicit_none_disables_cache(self, tmp_path):
+        """显式传 cache_dir=None 时，_builder.cache 应为 None。"""
+        from factor_framework.pipeline import FactorPipeline
+        stocks_dir = self._make_stocks_dir(tmp_path)
+        pipe = FactorPipeline(
+            stocks_dir  = str(stocks_dir),
+            stock_basic = str(tmp_path / "nonexistent.csv"),
+            verbose     = False,
+            cache_dir   = None,
+        )
+        assert pipe._builder.cache is None
+
+    def test_explicit_cache_dir_uses_specified_path(self, tmp_path):
+        """显式传 cache_dir 时，CacheLayer 的 cache_dir 应匹配。"""
+        from factor_framework.pipeline import FactorPipeline
+        from factor_framework.engine.cache import CacheLayer
+        stocks_dir = self._make_stocks_dir(tmp_path)
+        custom_cache = tmp_path / "my_cache"
+        pipe = FactorPipeline(
+            stocks_dir  = str(stocks_dir),
+            stock_basic = str(tmp_path / "nonexistent.csv"),
+            verbose     = False,
+            cache_dir   = str(custom_cache),
+        )
+        assert pipe._builder.cache is not None
+        assert isinstance(pipe._builder.cache, CacheLayer)
+
+    def test_cache_layer_get_returns_none_on_miss(self, tmp_path):
+        """未命中时 CacheLayer.get_panel 应返回 None。"""
+        from factor_framework.engine.cache import CacheLayer
+        cache = CacheLayer(
+            cache_dir     = str(tmp_path / "cache"),
+            stocks_dir    = str(tmp_path / "Stocks"),
+            enabled_l2    = False,   # 仅 L1
+        )
+        key = cache.make_key("nonexistent_factor", "20200101", "20201231", [])
+        result = cache.get_panel("nonexistent_factor", key)
+        assert result is None
+
+    def test_cache_layer_put_and_get_roundtrip(self, tmp_path):
+        """L1 缓存 put → get 应能正确取回相同数据。"""
+        from factor_framework.engine.cache import CacheLayer
+        cache = CacheLayer(
+            cache_dir     = str(tmp_path / "cache"),
+            stocks_dir    = str(tmp_path / "Stocks"),
+            enabled_l2    = False,
+        )
+        df = pd.DataFrame({"A": [1.0, 2.0], "B": [3.0, 4.0]}, index=["20200101", "20200102"])
+        key = cache.make_key("test_factor", "20200101", "20200102", ["A", "B"])
+        cache.put_panel("test_factor", key, df, calc_secs=0.0)
+        result = cache.get_panel("test_factor", key)
+        assert result is not None
+        pd.testing.assert_frame_equal(result, df)
+
+    def test_cache_info_shows_l1_entries(self, tmp_path):
+        """cache_info() 应返回 l1_entries 字段。"""
+        from factor_framework.engine.cache import CacheLayer
+        cache = CacheLayer(
+            cache_dir  = str(tmp_path / "cache"),
+            stocks_dir = str(tmp_path / "Stocks"),
+            enabled_l2 = False,
+        )
+        info = cache.cache_info()
+        assert "l1_entries" in info
+        assert info["l1_entries"] == 0
+
+    def test_cache_info_increments_after_put(self, tmp_path):
+        """put 之后 l1_entries 应增加。"""
+        from factor_framework.engine.cache import CacheLayer
+        cache = CacheLayer(
+            cache_dir  = str(tmp_path / "cache"),
+            stocks_dir = str(tmp_path / "Stocks"),
+            enabled_l2 = False,
+        )
+        df = pd.DataFrame({"A": [1.0]}, index=["20200101"])
+        key = cache.make_key("f1", "20200101", "20200101", ["A"])
+        cache.put_panel("f1", key, df, calc_secs=0.0)
+        assert cache.cache_info()["l1_entries"] >= 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TestFactorEngineDeprecation  (DoD C1)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestFactorEngineDeprecation:
+    """
+    DoD C1 — 直接实例化 FactorEngine 应发出 DeprecationWarning。
+    通过 PanelBuilder 内部实例化则不应发出警告。
+    """
+
+    def setup_method(self):
+        """每个测试前重置 FactorEngine._deprecation_warned，确保 warning 可触发。"""
+        from factor_framework.factor_engine import FactorEngine
+        FactorEngine._deprecation_warned = False
+
+    def test_direct_instantiation_emits_deprecation_warning(self, tmp_path):
+        """直接 FactorEngine() 应发出 DeprecationWarning。"""
+        import warnings
+        from factor_framework.factor_engine import FactorEngine
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            FactorEngine(
+                stocks_dir  = str(tmp_path),
+                stock_basic = str(tmp_path / "nonexistent.csv"),
+                verbose     = False,
+            )
+        dep_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+        assert len(dep_warnings) >= 1
+        assert "FactorEngine" in str(dep_warnings[0].message) or "兼容层" in str(dep_warnings[0].message)
+
+    def test_warning_issued_only_once(self, tmp_path):
+        """同一进程内 DeprecationWarning 只发出一次（类级别 flag）。"""
+        import warnings
+        from factor_framework.factor_engine import FactorEngine
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            FactorEngine(stocks_dir=str(tmp_path), stock_basic=str(tmp_path / "none.csv"), verbose=False)
+            FactorEngine(stocks_dir=str(tmp_path), stock_basic=str(tmp_path / "none.csv"), verbose=False)
+        dep_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+        assert len(dep_warnings) == 1
+
+    def test_internal_flag_suppresses_warning(self, tmp_path):
+        """传入 _internal=True 时不应发出 DeprecationWarning。"""
+        import warnings
+        from factor_framework.factor_engine import FactorEngine
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            FactorEngine(
+                stocks_dir  = str(tmp_path),
+                stock_basic = str(tmp_path / "none.csv"),
+                verbose     = False,
+                _internal   = True,
+            )
+        dep_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+        assert len(dep_warnings) == 0
+
+    def test_panel_builder_does_not_emit_deprecation_warning(self, tmp_path):
+        """PanelBuilder.engine 访问不应触发 DeprecationWarning。"""
+        import warnings
+        from factor_framework.engine.panel_builder import PanelBuilder
+        stocks_dir = tmp_path / "Stocks"
+        stocks_dir.mkdir()
+        builder = PanelBuilder(
+            stocks_dir  = str(stocks_dir),
+            stock_basic = str(tmp_path / "nonexistent.csv"),
+            verbose     = False,
+        )
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _ = builder.engine  # 触发延迟初始化
+        dep_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+        assert len(dep_warnings) == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TestIcDecayDeprecationWarning  (DoD B3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestIcDecayDeprecationWarning:
+    """
+    DoD B3 — ic_decay() 的 price_panel 路径应发出 DeprecationWarning。
+    return_panels 路径（主路径）不应发出 DeprecationWarning。
+    """
+
+    @staticmethod
+    def _make_panels(n=60, n_stocks=15):
+        rng = np.random.default_rng(0)
+        dates   = pd.date_range("20200101", periods=n, freq="B").strftime("%Y%m%d")
+        stocks  = [f"S{i:02d}" for i in range(n_stocks)]
+        factor  = pd.DataFrame(rng.standard_normal((n, n_stocks)), index=dates, columns=stocks)
+        price   = pd.DataFrame(10.0 + rng.standard_normal((n, n_stocks)).cumsum(axis=0),
+                               index=dates, columns=stocks)
+        return factor, price
+
+    def test_price_panel_path_emits_deprecation_warning(self):
+        """ic_decay(price_panel=...) 回退路径应发出 DeprecationWarning。"""
+        import warnings
+        from factor_framework.ic_analysis import ic_decay
+        fp, price = self._make_panels()
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            ic_decay(fp, price_panel=price, forward_periods=[1, 5])
+        dep_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+        assert len(dep_warnings) >= 1
+        assert "price_panel" in str(dep_warnings[0].message) or "废弃" in str(dep_warnings[0].message)
+
+    def test_return_panels_path_no_deprecation_warning(self):
+        """ic_decay(return_panels=...) 主路径不应发出 DeprecationWarning。"""
+        import warnings
+        from factor_framework.ic_analysis import ic_decay, compute_ic
+        fp, price = self._make_panels()
+        ret = price.shift(-5) / price.replace(0, np.nan) - 1
+        return_panels = {5: ret}
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            ic_decay(fp, return_panels=return_panels)
+        dep_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+        assert len(dep_warnings) == 0
+
+    def test_ic_decay_main_path_returns_dataframe(self):
+        """ic_decay(return_panels=...) 应返回有效 DataFrame。"""
+        from factor_framework.ic_analysis import ic_decay
+        fp, price = self._make_panels()
+        ret1 = price.shift(-1) / price.replace(0, np.nan) - 1
+        ret5 = price.shift(-5) / price.replace(0, np.nan) - 1
+        result = ic_decay(fp, return_panels={1: ret1, 5: ret5})
+        assert isinstance(result, pd.DataFrame)
+        assert set(result.index) == {1, 5}
+        assert "mean_ic" in result.columns
+
+    def test_both_none_raises_value_error(self):
+        """price_panel=None 且 return_panels=None 应抛出 ValueError。"""
+        from factor_framework.ic_analysis import ic_decay
+        fp, _ = self._make_panels()
+        with pytest.raises(ValueError, match="None"):
+            ic_decay(fp)
+

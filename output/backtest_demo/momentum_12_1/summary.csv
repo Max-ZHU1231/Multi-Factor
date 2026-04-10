@@ -1,0 +1,2 @@
+mean_ic,std_ic,icir,win_rate,t_stat,p_value,ic_positive,ic_negative,total_periods,annualized_icir,nw_t_stat,nw_p_value,n,ls_annual_return,ls_sharpe,ls_max_drawdown,ls_calmar,ls_win_rate,monotone_score,avg_turnover,avg_cost
+-0.033058,0.132274,-0.2499,0.4306,-2.1206,0.0374,31,41,72,-0.8657,-2.2729,0.0261,72,-0.046778871449177695,-0.44873186852022,-0.42019844506709536,-0.11132566528585859,0.4305555555555556,-0.3,0.1759,0.000352

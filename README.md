@@ -257,15 +257,135 @@ python -m pytest validation/test_lookahead_bias.py -v
 
 | File | Tests |
 |------|-------|
-| `test_factor_framework.py` | 519 |
+| `test_factor_framework.py` | 550 |
 | `test_lookahead_bias.py` | 69 |
-| **Total** | **588** |
+| **Total** | **619** |
+
+---
+
+## Phase 2 Architecture — Main Path
+
+> v3.3 wires all Phase 2 abstractions together end-to-end.
+
+```
+FactorPipeline
+│
+├── DataStore (CSVDataStore)      ← data access layer
+│     └── get_price_panel()       → TimestampedPanel(semantic='price')
+│
+├── PanelBuilder                  ← computation + cache coordinator
+│     ├── store: DataStore
+│     ├── cache: CacheLayer (L1 memory + L2 Parquet)
+│     └── engine: FactorEngine (_internal=True, no deprecation warn)
+│
+├── compute_ic(factor, return)    ← B1 guard: align_with() if TimestampedPanel
+│     └── TimingAlignmentError / SemanticCompatibilityError on bad semantics
+│
+├── layer_backtest(factor, return) ← B1 guard: same as above
+│
+└── ic_decay(return_panels=...)   ← B3: main path (no DeprecationWarning)
+      └── ic_decay(price_panel=...) raises DeprecationWarning (legacy)
+```
+
+**Recommended usage (v3.3+):**
+
+```python
+from factor_framework.pipeline import FactorPipeline
+
+pipe = FactorPipeline(
+    stocks_dir  = "stocks/stocks/",
+    stock_basic = "股票列表-stock_basic.csv",
+    # cache_dir defaults to "cache/" — L2 Parquet cache auto-enabled
+    # store defaults to CSVDataStore(stocks_dir) — auto-constructed
+)
+pipe.register_builtins(["momentum_12_1"])
+report = pipe.run("momentum_12_1", forward=21)
+report.print_summary()
+```
+
+---
+
+## Caching
+
+### Default behavior (v3.3+)
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `cache_dir` | `"cache/"` | L2 Parquet cache **enabled by default** |
+| `min_calc_secs` | `5.0` | Only cache panels that took > 5 s to compute |
+
+The cache is stored under `cache/<factor_name>/<key>.parquet`. Keys are MD5 hashes of `(factor_name, start, end, sorted_symbols)`, so any change in inputs produces a new key.
+
+### Disabling the cache
+
+```python
+pipe = FactorPipeline(..., cache_dir=None)   # L2 disabled; L1 still active
+```
+
+### Clearing the cache
+
+```python
+from factor_framework.engine.cache import CacheLayer
+cache = CacheLayer(cache_dir="cache/", stocks_dir="stocks/stocks/")
+cache.clear_l2()          # delete all Parquet files
+cache.clear_l1()          # release memory
+print(cache.cache_info()) # {'l1_entries': 0, ...}
+```
+
+---
+
+## Time-Semantic Conventions
+
+All `TimestampedPanel` instances carry a `semantic` attribute that encodes the
+meaning of the data and enforces alignment rules at runtime:
+
+| semantic | Description | Key constraints |
+|----------|-------------|-----------------|
+| `"price"` | Raw/adjusted closing prices | Cannot align with factor or return panels |
+| `"factor_observation"` | Factor values observed at market close on date t | Must call `.shift_to_t1()` before aligning with `forward_return` |
+| `"forward_return"` | Forward return starting at t (or t+1 if T+1-shifted) | Must originate from `ReturnPanel.build()` |
+
+### T+1 shift convention
+
+`factor_observation` panels must be shifted one day forward before pairing with
+`forward_return` panels, to prevent look-ahead bias:
+
+```python
+from factor_framework.core.panel import TimestampedPanel
+from factor_framework.core.returns import ReturnPanel
+from factor_framework.ic_analysis import compute_ic
+
+factor_ts = TimestampedPanel.from_dataframe(factor_df, semantic="factor_observation", factor_name="mom")
+factor_t1 = factor_ts.shift_to_t1()        # shift factor by 1 day (use t's factor to predict t+1 return)
+
+ret_ts = ReturnPanel.build(price_ts, forward_days=21)   # forward_return panel (no T+1 here)
+
+ic = compute_ic(factor_t1, ret_ts)         # align_with() validates semantics automatically
+```
+
+If you pass an un-shifted `factor_observation` against a `forward_return`, `compute_ic` and
+`layer_backtest` will raise `TimingAlignmentError` immediately.
+
+### DoD validation
+
+```bash
+python scripts/run_validation.py   # 13/13 checks, exits 0 on pass
+```
 
 ---
 
 ## Release History
 
-### v3.2 — Phase 3 (current)
+### v3.3 — Phase 2 DoD (current)
+- **B1** `compute_ic` / `layer_backtest` wire `align_with()` semantic guard for `TimestampedPanel`
+- **B2** `PanelBuilder(store=...)` accepts `DataStore`; `FactorPipeline` auto-constructs `CSVDataStore`
+- **B3** `ic_decay(price_panel=...)` legacy path emits `DeprecationWarning`
+- **B4** `cache_dir` default changed from `None` to `"cache/"` — L2 cache enabled out-of-the-box
+- **C1** `FactorEngine` direct instantiation emits one-time `DeprecationWarning`; `PanelBuilder` passes `_internal=True` to suppress it
+- `scripts/run_validation.py` — 13-point DoD validation script
+- **+31 new tests → 619 total**
+
+### v3.2 — Phase 3
 - Factor sub-package with category files (`momentum`, `volatility`, `value`, `volume`)
 - `TransformPipeline` — composable cross-section transform pipeline
 - `ICAnalyzer` — structured IC analysis with Newey-West t-stats and IC decay
@@ -273,7 +393,7 @@ python -m pytest validation/test_lookahead_bias.py -v
 - `FactorRegistry` + `FactorMeta` + `FactorCategory`
 - `scripts/`, `analysis/`, `validation/` directory structure
 - `pyproject.toml` with PEP 517 build config
-- **+34 new tests -> 588 total**
+- **+34 new tests → 588 total**
 
 ### v3.1 — Phase 2
 - `DataStore`: unified data access layer

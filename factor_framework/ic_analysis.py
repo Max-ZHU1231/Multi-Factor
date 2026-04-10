@@ -39,8 +39,8 @@ def compute_ic(
 
     Parameters
     ----------
-    factor_panel : (日期 × 股票) 因子面板
-    return_panel : (日期 × 股票) 未来收益面板
+    factor_panel : (日期 × 股票) 因子面板；可为 TimestampedPanel（优先使用语义守卫）
+    return_panel : (日期 × 股票) 未来收益面板；可为 TimestampedPanel
     method       : 'rank'（Rank IC，推荐）或 'normal'（Normal IC / Pearson）
     min_stocks   : 每期至少需要的有效截面数量，不足则置 NaN
 
@@ -48,6 +48,19 @@ def compute_ic(
     -------
     pd.Series，index = 日期，values = IC 值
     """
+    # ── B1: TimestampedPanel 语义守卫 ────────────────────────────────────────
+    try:
+        from factor_framework.core.panel import TimestampedPanel
+        if isinstance(factor_panel, TimestampedPanel) and isinstance(return_panel, TimestampedPanel):
+            # align_with 会抛出 TimingAlignmentError / SemanticCompatibilityError
+            factor_panel, return_panel = factor_panel.align_with(return_panel)
+        elif isinstance(factor_panel, TimestampedPanel):
+            factor_panel.assert_valid()
+        elif isinstance(return_panel, TimestampedPanel):
+            return_panel.assert_valid()
+    except ImportError:
+        pass
+
     # 取公共日期 + 公共股票，保证维度对齐
     common_dates  = factor_panel.index.intersection(return_panel.index)
     common_stocks = factor_panel.columns.intersection(return_panel.columns)
@@ -283,6 +296,13 @@ def ic_decay(
             f"不超过最大 forward={max_fwd}，无法计算。"
         )
 
+    warnings.warn(
+        "ic_decay() 的 price_panel 路径已废弃（v3.2+）。\n"
+        "请改用 return_panels 参数（由 ReturnPanel.build_multi_forward() 构建），\n"
+        "以确保与主 IC 路径时间语义一致（含 T+1 shift）。",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     warnings.warn(
         f"[ic_decay] 已截断 price_panel 末尾 {max_fwd} 行"
         f"（原 {len(price_panel)} 行 → 截后 {len(price_panel) - max_fwd} 行），"

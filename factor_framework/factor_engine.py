@@ -3,6 +3,17 @@ factor_engine.py
 ================
 因子注册 / 计算 / 面板构建引擎。
 
+.. deprecated::
+    **兼容层（v3.2+）**：直接使用本模块是旧路径。
+    新代码推荐使用：
+      - `factor_framework.engine.panel_builder.PanelBuilder` — 带缓存的面板构建
+      - `factor_framework.data.store.CSVDataStore` — 数据访问抽象
+      - `factor_framework.core.panel.TimestampedPanel` — 带语义的面板类型
+      - `factor_framework.core.returns.ReturnPanel` — 收益率唯一来源
+
+    本模块作为执行引擎（计算后端）保留，但外部代码不应直接实例化 FactorEngine，
+    而应通过 PanelBuilder 访问。首次直接实例化时将发出一次性 DeprecationWarning。
+
 核心概念
 --------
 - 面板（Panel）: DataFrame，index=交易日(str YYYYMMDD)，columns=ts_code，values=因子值
@@ -162,7 +173,14 @@ class FactorEngine:
     1. 注册因子函数（lambda 方式）或表达式树（DAG 方式）
     2. 批量遍历 Stocks/ 目录，对每只股票计算因子
     3. 拼接成 (日期 × 股票) 面板 DataFrame
+
+    .. deprecated::
+        直接实例化 FactorEngine 是旧路径（v3.2+ 兼容层）。
+        新代码请使用 PanelBuilder + CSVDataStore，参见 README 阶段二主路径。
     """
+
+    # 一次性 deprecation warning（避免每次构造都刷屏）
+    _deprecation_warned: bool = False
 
     def __init__(
         self,
@@ -172,7 +190,17 @@ class FactorEngine:
         verbose:     bool = True,
         intermediate_lru: int = _DEFAULT_INTERMEDIATE_LRU,
         factor_lru:       int = _DEFAULT_FACTOR_LRU,
+        _internal: bool = False,   # PanelBuilder 内部调用时传 True，抑制警告
     ):
+        if not _internal and not FactorEngine._deprecation_warned:
+            warnings.warn(
+                "直接实例化 FactorEngine 是兼容层路径（v3.2+）。\n"
+                "新代码推荐使用 PanelBuilder + CSVDataStore，参见 README 阶段二主路径。\n"
+                "如需抑制此警告，通过 PanelBuilder 间接使用（_internal=True 自动设置）。",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            FactorEngine._deprecation_warned = True
         self.stocks_dir  = Path(stocks_dir)
         self.stock_basic = Path(stock_basic)
         self.min_rows    = min_rows

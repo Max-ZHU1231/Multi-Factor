@@ -71,6 +71,7 @@ class PanelBuilder:
     min_rows    : 有效数据的最少行数
     verbose     : 是否打印进度条
     n_jobs      : 并行线程数
+    store       : DataStore 实例（可选）；传入后优先通过 DataStore 读取数据
     """
 
     def __init__(
@@ -81,6 +82,7 @@ class PanelBuilder:
         min_rows:    int = 60,
         verbose:     bool = True,
         n_jobs:      int = 8,
+        store=None,  # Optional[DataStore] — 避免循环导入，运行时检查类型
     ) -> None:
         self.stocks_dir  = Path(stocks_dir)
         self.stock_basic = Path(stock_basic)
@@ -88,6 +90,7 @@ class PanelBuilder:
         self.min_rows    = min_rows
         self.verbose     = verbose
         self.n_jobs      = n_jobs
+        self.store       = store   # DataStore 实例（可选）
 
         # 延迟初始化 FactorEngine（避免在 import 时触发重量级初始化）
         self._engine: Optional[object] = None
@@ -104,6 +107,7 @@ class PanelBuilder:
                 stock_basic = self.stock_basic,
                 min_rows    = self.min_rows,
                 verbose     = self.verbose,
+                _internal   = True,   # 通过 PanelBuilder 调用，抑制 deprecation 警告
             )
         return self._engine
 

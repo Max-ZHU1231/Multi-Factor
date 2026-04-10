@@ -1,0 +1,5 @@
+{
+    "github.copilot.advanced": {
+        "chat.tools.autoApprove": true,
+    }
+}
