@@ -391,29 +391,24 @@ class FactorPipeline:
             return_panel = return_panel.loc[valid_ret_idx]
             factor_panel = factor_panel.loc[factor_panel.index.intersection(valid_ret_idx)]
 
-        # ── 月度重采样（可选）────────────────────────────────────────────────
-        # 对 factor_panel / return_panel 按月末对齐，避免日频滚动模拟月度换仓
-        # 导致的换手率虚高问题。
-        if resample_monthly:
-            factor_panel, return_panel = _resample_monthly(factor_panel, return_panel)
-            print(f"      [月度重采样] {factor_panel.shape[0]} 个月末截面")
-
-        # ── 截面预处理 ──────────────────────────────────────────────────────
+        # ── 截面预处理（在日频上执行，避免月度重采样后频率不匹配）──────────
+        # BUG 11 FIX: mktcap_panel 必须 reindex 到已截断的日频 factor_panel.index，
+        # 否则月度重采样后行数不匹配。
+        # BUG 10 NOTE: T+1 已内置于 build_return_panel（price.shift(-fwd)/price-1 再
+        # .shift(1)），即 return_panel[t] = t+1 日起持有的远期收益。故 factor_panel[t]
+        # （t 日收盘计算）与 return_panel[t] 对齐是正确的，无需额外移位。
         print(f"\n[3/6] 截面预处理（winsorize={winsorize}, standardize={standardize}, neutralize={neutralize}）...")
 
         if winsorize:
             factor_panel = self.engine.apply_cross_section(factor_panel, cs_winsorize)
 
         if neutralize and self.engine.industry_map is not None:
-            mktcap_panel = self.engine.build_panel("__mktcap__", start=start, end=end, symbols=symbols) \
-                if "__mktcap__" in self.engine.registered() else pd.DataFrame()
-
-            if mktcap_panel.empty:
-                # 临时注册市值因子
-                self.engine.register("__mktcap__", lambda df: df["总市值（万元）"])
-                mktcap_panel = self.engine.build_panel("__mktcap__", start=start, end=end, symbols=symbols)
-                del self.engine._registry["__mktcap__"]
-
+            # 临时注册市值因子
+            self.engine.register("__mktcap__", lambda df: df["总市值（万元）"])
+            mktcap_panel = self.engine.build_panel("__mktcap__", start=start, end=end, symbols=symbols)
+            del self.engine._registry["__mktcap__"]
+            # BUG 11 FIX: 对齐到已截断的日频 factor_panel.index
+            mktcap_panel = mktcap_panel.reindex(factor_panel.index)
             factor_panel = neutralize_regression(
                 factor_panel,
                 mktcap_panel,
@@ -427,19 +422,30 @@ class FactorPipeline:
         elif standardize == "zscore":
             factor_panel = self.engine.apply_cross_section(factor_panel, cs_zscore)
 
-        # ── IC 分析 ──────────────────────────────────────────────────────────
+        # ── IC 衰减分析（在月度重采样前用日频面板执行）─────────────────────
+        # BUG 12 FIX: ic_decay 必须在 resample_monthly 之前调用，否则月末索引与日频
+        # close_panel 的 intersection 几乎为空。
         print(f"\n[4/6] IC 分析（method={ic_method}）...")
-        ic_series = compute_ic(factor_panel, return_panel, method=ic_method)
-        ic_s      = ic_stats(ic_series, annualize_periods=periods_per_year)
-        ic_nw     = ic_significance(ic_series, lags=max(1, int(len(ic_series) ** 0.25)))
-
-        # IC 衰减（需要价格面板）
         self.engine.register("__close__", lambda df: df["收盘价"])
         close_panel = self.engine.build_panel("__close__", start=start, end=end, symbols=symbols)
         del self.engine._registry["__close__"]
         ic_decay_df = ic_decay(factor_panel, close_panel, forward_periods=ic_forward_list, method=ic_method)
 
+        # ── 月度重采样（可选，在截面预处理和 IC 衰减之后）──────────────────
+        # BUG 13/15 NOTE: 月度重采样后 factor_panel/return_panel 为月末截面，
+        # layer_backtest 和 turnover_analysis 中每行对应一个月，不存在日频滚动重叠。
+        if resample_monthly:
+            factor_panel, return_panel = _resample_monthly(factor_panel, return_panel)
+            print(f"      [月度重采样] {factor_panel.shape[0]} 个月末截面")
+
+        # ── IC 分析（月度重采样后执行，与 return_panel 频率一致）────────────
+        ic_series = compute_ic(factor_panel, return_panel, method=ic_method)
+        ic_s      = ic_stats(ic_series, annualize_periods=periods_per_year)
+        ic_nw     = ic_significance(ic_series, lags=max(1, int(len(ic_series) ** 0.25)))
+
         # ── 分层回测 ──────────────────────────────────────────────────────────
+        # BUG 14 NOTE: periods_per_year 由调用方指定（月度重采样后应传 12），
+        # _annual_return 使用 total^(periods_per_year/n)-1，月频输入时正确年化。
         print(f"\n[5/6] 分层回测（n_groups={n_groups}）...")
         layer_ret = layer_backtest(
             factor_panel, return_panel,
@@ -534,11 +540,8 @@ class FactorPipeline:
                 factor_panel = raw_panel.loc[common_idx]
                 ret_panel    = return_panel.loc[common_idx]
 
-                # ── 月度重采样（每因子独立，return_panel 共享同一月末对齐）──
-                if resample_monthly:
-                    factor_panel, ret_panel = _resample_monthly(factor_panel, ret_panel)
-
-                # ── 截面预处理 ──────────────────────────────────────────────
+                # ── 截面预处理（在日频上执行，避免月度重采样后频率不匹配）──
+                # BUG 11 FIX: mktcap/neutralize 必须在 resample 前，在已截断的日频上做
                 if winsorize:
                     factor_panel = self.engine.apply_cross_section(factor_panel, cs_winsorize)
 
@@ -546,6 +549,8 @@ class FactorPipeline:
                     self.engine.register("__mktcap__", lambda df: df["总市值（万元）"])
                     mktcap_panel = self.engine.build_panel("__mktcap__")
                     del self.engine._registry["__mktcap__"]
+                    # BUG 11 FIX: reindex 到已截断的日频 factor_panel.index
+                    mktcap_panel = mktcap_panel.reindex(factor_panel.index)
                     factor_panel = neutralize_regression(
                         factor_panel, mktcap_panel,
                         industry_map=self.engine.industry_map,
@@ -558,15 +563,23 @@ class FactorPipeline:
                 elif standardize == "zscore":
                     factor_panel = self.engine.apply_cross_section(factor_panel, cs_zscore)
 
-                # ── IC 分析 ─────────────────────────────────────────────────
+                # ── IC 衰减分析（在月度重采样前用日频面板执行）──────────────
+                # BUG 12 FIX: ic_decay 必须在 resample_monthly 之前调用
+                ic_decay_df = ic_decay(
+                    factor_panel, close_panel,
+                    forward_periods=ic_forward_list, method=ic_method,
+                )
+
+                # ── 月度重采样（在截面预处理和 IC 衰减之后）────────────────
+                # BUG 13/15 NOTE: 月度重采样后每行对应一个月，无日频滚动重叠
+                if resample_monthly:
+                    factor_panel, ret_panel = _resample_monthly(factor_panel, ret_panel)
+
+                # ── IC 分析（月度重采样后与 ret_panel 频率一致）─────────────
                 ic_series   = compute_ic(factor_panel, ret_panel, method=ic_method)
                 ic_s        = ic_stats(ic_series, annualize_periods=periods_per_year)
                 ic_nw       = ic_significance(
                     ic_series, lags=max(1, int(len(ic_series) ** 0.25))
-                )
-                ic_decay_df = ic_decay(
-                    factor_panel, close_panel,
-                    forward_periods=ic_forward_list, method=ic_method,
                 )
 
                 # ── 分层回测 ────────────────────────────────────────────────

@@ -3558,3 +3558,422 @@ class TestV292Fixes:
         assert new_nan_count <= old_nan_count, (
             f"新方法 NaN 数（{new_nan_count}）不应多于旧方法（{old_nan_count}）"
         )
+
+
+
+# =============================================================================
+# v2.9.3 Tests — BUG 10-15 fixes
+# =============================================================================
+
+class TestV293Fixes:
+    """
+    v2.9.3 修复验证：
+      BUG 10 — build_return_panel T+1 已内置，无需外部额外移位
+      BUG 11 — mktcap_panel 在 neutralize_regression 前 reindex 对齐
+      BUG 12 — ic_decay 在 _resample_monthly 之前（日频上）执行
+      BUG 13 — 月度重采样后 layer_backtest 正确使用月频面板
+      BUG 14 — _annual_return / long_short_stats 按月频 periods_per_year=12 年化
+      BUG 15 — 月频换手率 < 日频换手率（月频面板行数更少）
+    """
+
+    # ------------------------------------------------------------------ #
+    # 辅助方法                                                              #
+    # ------------------------------------------------------------------ #
+
+    def _make_tmp_engine(self, n=30, n_stocks=2, seed=0):
+        """
+        构建最小化临时目录 + FactorEngine，用于 BUG 10 的功能测试。
+        CSV 列名使用实际格式：'交易日'、'收盘价'、'复权因子'、'总市值（万元）'。
+        """
+        import tempfile, os
+        import factor_framework.factor_engine as fe
+
+        np.random.seed(seed)
+        dates = [d.strftime('%Y%m%d') for d in
+                 pd.date_range('2020-01-02', periods=n, freq='B')]
+        syms = [f'T{i:02d}' for i in range(n_stocks)]
+
+        tmpdir = tempfile.mkdtemp()
+        for sym in syms:
+            prices = np.cumprod(1 + np.random.randn(n) * 0.01) * 10.0
+            pd.DataFrame([
+                {'交易日': d, '股票代码': sym,
+                 '收盘价': round(prices[i], 6),
+                 '复权因子': 1.0,
+                 '总市值（万元）': 1e6}
+                for i, d in enumerate(dates)
+            ]).to_csv(os.path.join(tmpdir, f'{sym}.csv'), index=False)
+
+        engine = fe.FactorEngine(tmpdir, verbose=False, min_rows=3)
+        return engine, dates, syms
+
+    def _make_panels(self, n_dates=40, n_stocks=12, seed=42):
+        """
+        构建随机日频因子/收益率面板，用于 BUG 12–15 的功能测试。
+        index 为 DatetimeIndex（业务日）。
+        """
+        np.random.seed(seed)
+        dates = pd.date_range('2018-01-02', periods=n_dates, freq='B')
+        cols = [f'S{i:02d}' for i in range(n_stocks)]
+        fp = pd.DataFrame(np.random.randn(n_dates, n_stocks),
+                          index=dates, columns=cols)
+        rp = pd.DataFrame(np.random.randn(n_dates, n_stocks) * 0.05,
+                          index=dates, columns=cols)
+        return fp, rp
+
+    # ------------------------------------------------------------------ #
+    # BUG 10 — 源码白盒：T+1 内置于 build_return_panel                     #
+    # ------------------------------------------------------------------ #
+
+    def test_bug10_t1_in_source(self):
+        """build_return_panel 源码含 .shift(1)，说明 T+1 已内置。"""
+        import inspect
+        import factor_framework.factor_engine as fe
+        src = inspect.getsource(fe.FactorEngine.build_return_panel)
+        assert '.shift(1)' in src, \
+            'build_return_panel 应在源码中包含 .shift(1) 实现 T+1 内置'
+
+    def test_bug10_no_double_shift_in_pipeline(self):
+        """pipeline.run 源码不应再对 return_panel 做额外 shift。"""
+        import inspect
+        import factor_framework.pipeline as pp
+        src = inspect.getsource(pp.FactorPipeline.run)
+        assert 'return_panel.shift' not in src, \
+            'pipeline.run 不应对 return_panel 额外 shift（T+1 已在 build_return_panel 内置）'
+
+    def test_bug10_return_panel_shape_and_tail_nan(self):
+        """
+        功能测试：build_return_panel 的 NaN 模式符合预期。
+        fwd=5：第 0 行为 NaN（T+1 shift），最后 fwd-1=4 行为 NaN，中间行有效。
+        """
+        engine, dates, syms = self._make_tmp_engine(n=30, n_stocks=2)
+        fwd = 5
+        ret = engine.build_return_panel(
+            forward=fwd, start=dates[0], end=dates[-1], symbols=syms)
+
+        assert ret.shape[0] == 30, f'行数应等于 n=30，实际 {ret.shape[0]}'
+        assert ret.shape[1] == len(syms), f'列数应等于股票数 {len(syms)}'
+
+        # 首行 NaN（T+1 shift）
+        assert ret.iloc[0].isna().all(), '第 0 行应全为 NaN（T+1 shift）'
+
+        # 尾部 fwd-1 行 NaN（shift(-fwd) 后无数据 + shift(1) 偏移）
+        assert ret.iloc[-(fwd - 1):].isna().all().all(), \
+            f'最后 {fwd - 1} 行应全为 NaN'
+
+        # 中间行有有效数据
+        assert ret.iloc[1:-(fwd - 1)].notna().any().any(), \
+            '中间行应有有效收益率数据'
+
+    def test_bug10_alignment_formula(self):
+        """
+        公式验证：ret.iloc[i] = price[i-1+fwd] / price[i-1] - 1
+        （T+1 对齐：factor 在 i-1 日收盘后计算，i 日才能成交）。
+        """
+        import tempfile, os
+        import factor_framework.factor_engine as fe
+
+        fwd = 3
+        n = 15
+        dates = [d.strftime('%Y%m%d') for d in
+                 pd.date_range('2020-01-02', periods=n, freq='B')]
+        prices = [10.0 * (1.0 + 0.01 * i) for i in range(n)]  # 线性递增
+
+        tmpdir = tempfile.mkdtemp()
+        pd.DataFrame([
+            {'交易日': dates[i], '股票代码': 'A',
+             '收盘价': round(prices[i], 8),
+             '复权因子': 1.0, '总市值（万元）': 1e6}
+            for i in range(n)
+        ]).to_csv(os.path.join(tmpdir, 'A.csv'), index=False)
+
+        engine = fe.FactorEngine(tmpdir, verbose=False, min_rows=3)
+        ret = engine.build_return_panel(
+            forward=fwd, start=dates[0], end=dates[-1], symbols=['A'])
+
+        # 从 i=1 开始（i=0 因 T+1 shift 为 NaN）
+        for i in range(1, n - fwd):
+            expected = prices[i - 1 + fwd] / prices[i - 1] - 1
+            actual = ret.iloc[i, 0]
+            assert abs(actual - expected) < 1e-6, \
+                f'ret[{i}] 应为 price[{i-1+fwd}]/price[{i-1}]-1=' \
+                f'{expected:.6f}，实际 {actual:.6f}'
+
+    # ------------------------------------------------------------------ #
+    # BUG 11 — mktcap reindex 在中性化前，且位于 resample 前              #
+    # ------------------------------------------------------------------ #
+
+    def test_bug11_mktcap_reindex_in_run_source(self):
+        """pipeline.run 源码应含 mktcap_panel.reindex(factor_panel.index)。"""
+        import inspect
+        import factor_framework.pipeline as pp
+        src = inspect.getsource(pp.FactorPipeline.run)
+        assert 'mktcap_panel.reindex(factor_panel.index)' in src, \
+            'run() 应在 neutralize 前对 mktcap_panel 做 reindex 对齐'
+
+    def test_bug11_neutralize_before_resample_in_run(self):
+        """pipeline.run 中 neutralize_regression 应在 _resample_monthly 之前调用。"""
+        import inspect
+        import factor_framework.pipeline as pp
+        lines = inspect.getsource(pp.FactorPipeline.run).splitlines()
+        neut_idx = next(
+            (i for i, l in enumerate(lines) if 'neutralize_regression(' in l),
+            None)
+        rs_idx = next(
+            (i for i, l in enumerate(lines)
+             if '_resample_monthly(' in l and 'if' not in l),
+            None)
+        assert neut_idx is not None, 'run() 应调用 neutralize_regression'
+        assert rs_idx is not None, 'run() 应调用 _resample_monthly'
+        assert neut_idx < rs_idx, \
+            f'neutralize_regression（行{neut_idx}）应在 _resample_monthly（行{rs_idx}）之前'
+
+    def test_bug11_neutralize_before_resample_in_batch(self):
+        """run_batch_from_panels 中 neutralize_regression 应在 _resample_monthly 之前。"""
+        import inspect
+        import factor_framework.pipeline as pp
+        lines = inspect.getsource(pp.FactorPipeline.run_batch_from_panels).splitlines()
+        neut_idx = next(
+            (i for i, l in enumerate(lines) if 'neutralize_regression(' in l),
+            None)
+        rs_idx = next(
+            (i for i, l in enumerate(lines)
+             if '_resample_monthly(' in l and 'if' not in l),
+            None)
+        assert neut_idx is not None, 'run_batch_from_panels 应调用 neutralize_regression'
+        assert rs_idx is not None, 'run_batch_from_panels 应调用 _resample_monthly'
+        assert neut_idx < rs_idx, \
+            f'neutralize_regression（行{neut_idx}）应在 _resample_monthly（行{rs_idx}）之前'
+
+    def test_bug11_neutralize_misaligned_mktcap_via_reindex(self):
+        """
+        功能测试：mktcap_panel 行数多于 factor_panel 时，
+        reindex 后 neutralize_regression 结果形状与 factor_panel 一致且非全 NaN。
+        """
+        from factor_framework.neutralize import neutralize_regression
+
+        np.random.seed(1)
+        n_d, n_s = 20, 12  # >= 10 stocks（满足 neutralize_regression 最小股票数过滤）
+        dates = pd.date_range('2020-01-02', periods=n_d, freq='B')
+        cols = [f'S{i:02d}' for i in range(n_s)]
+
+        fp = pd.DataFrame(
+            np.random.randn(n_d, n_s), index=dates, columns=cols)
+
+        # mktcap 多 5 行（模拟日频范围更大的情况）
+        extra = pd.date_range('2019-12-20', periods=n_d + 5, freq='B')
+        mktcap_big = pd.DataFrame(
+            np.random.rand(n_d + 5, n_s) * 1e6 + 1e5,
+            index=extra, columns=cols)
+
+        # BUG 11 修复：先 reindex 再中性化
+        mktcap_aligned = mktcap_big.reindex(fp.index)
+        ind_map = pd.Series({c: f'IND{i % 3}' for i, c in enumerate(cols)})
+        result = neutralize_regression(fp, mktcap_aligned, industry_map=ind_map)
+
+        assert result.shape == fp.shape, \
+            f'reindex 后中性化结果形状应与 factor_panel 相同，' \
+            f'expected {fp.shape}, got {result.shape}'
+        assert result.notna().any().any(), '中性化结果不应全为 NaN'
+
+    # ------------------------------------------------------------------ #
+    # BUG 12 — ic_decay 在 _resample_monthly 之前执行（日频面板）          #
+    # ------------------------------------------------------------------ #
+
+    def test_bug12_ic_decay_before_resample_in_run(self):
+        """pipeline.run 中 ic_decay 应在 _resample_monthly 之前调用。"""
+        import inspect
+        import factor_framework.pipeline as pp
+        lines = inspect.getsource(pp.FactorPipeline.run).splitlines()
+        ic_idx = next(
+            (i for i, l in enumerate(lines) if 'ic_decay(' in l and '=' in l),
+            None)
+        rs_idx = next(
+            (i for i, l in enumerate(lines)
+             if '_resample_monthly(' in l and 'if' not in l),
+            None)
+        assert ic_idx is not None, 'run() 应调用 ic_decay'
+        assert rs_idx is not None, 'run() 应调用 _resample_monthly'
+        assert ic_idx < rs_idx, \
+            f'ic_decay（行{ic_idx}）应在 _resample_monthly（行{rs_idx}）之前'
+
+    def test_bug12_ic_decay_before_resample_in_batch(self):
+        """run_batch_from_panels 中 ic_decay 应在 _resample_monthly 之前调用。"""
+        import inspect
+        import factor_framework.pipeline as pp
+        lines = inspect.getsource(pp.FactorPipeline.run_batch_from_panels).splitlines()
+        ic_idx = next(
+            (i for i, l in enumerate(lines) if 'ic_decay(' in l and '=' in l),
+            None)
+        rs_idx = next(
+            (i for i, l in enumerate(lines)
+             if '_resample_monthly(' in l and 'if' not in l),
+            None)
+        assert ic_idx is not None, 'run_batch_from_panels 应调用 ic_decay'
+        assert rs_idx is not None, 'run_batch_from_panels 应调用 _resample_monthly'
+        assert ic_idx < rs_idx, \
+            f'ic_decay（行{ic_idx}）应在 _resample_monthly（行{rs_idx}）之前'
+
+    def test_bug12_daily_vs_monthly_ic_decay_overlap(self):
+        """
+        功能测试：日频因子面板与价格面板的索引重叠远多于月末采样后的重叠，
+        验证 ic_decay 在月度重采样前调用可利用更多有效数据点。
+        """
+        from factor_framework.pipeline import _resample_monthly
+        from factor_framework.ic_analysis import ic_decay
+
+        np.random.seed(7)
+        n_dates, n_stocks = 120, 10
+        biz_dates = pd.date_range('2018-01-02', periods=n_dates, freq='B')
+        cols = [f'S{i:02d}' for i in range(n_stocks)]
+
+        fp_daily = pd.DataFrame(
+            np.random.randn(n_dates, n_stocks), index=biz_dates, columns=cols)
+        rp_daily = pd.DataFrame(
+            np.random.randn(n_dates, n_stocks) * 0.05, index=biz_dates, columns=cols)
+        close_daily = pd.DataFrame(
+            np.cumprod(1 + np.random.randn(n_dates, n_stocks) * 0.01, axis=0) * 10,
+            index=biz_dates, columns=cols)
+
+        fp_monthly, _ = _resample_monthly(fp_daily, rp_daily)
+
+        daily_overlap = len(fp_daily.index.intersection(close_daily.index))
+        monthly_overlap = len(fp_monthly.index.intersection(close_daily.index))
+
+        assert daily_overlap > monthly_overlap, \
+            f'日频重叠({daily_overlap}) 应多于月频重叠({monthly_overlap})'
+
+        icd = ic_decay(fp_daily, close_daily, forward_periods=[1, 5], method='rank')
+        assert isinstance(icd, pd.DataFrame), 'ic_decay 应返回 DataFrame'
+        assert not icd.empty, 'ic_decay 在日频面板上不应返回空 DataFrame'
+
+    # ------------------------------------------------------------------ #
+    # BUG 13 — 月度重采样后 layer_backtest 使用月频面板                    #
+    # ------------------------------------------------------------------ #
+
+    def test_bug13_resample_reduces_rows(self):
+        """_resample_monthly 后行数应显著少于原始日频行数（< 1/3）。"""
+        from factor_framework.pipeline import _resample_monthly
+
+        fp, rp = self._make_panels(n_dates=120, n_stocks=10)
+        fp_m, rp_m = _resample_monthly(fp, rp)
+
+        assert len(fp_m) < len(fp) // 3, \
+            f'月末重采样后行数({len(fp_m)})应少于日频行数的 1/3({len(fp) // 3})'
+        assert fp_m.shape[1] == fp.shape[1], '重采样后列数（股票数）不变'
+
+    def test_bug13_layer_backtest_monthly_input(self):
+        """用月频面板做 layer_backtest，结果列名应包含 Q1~Qn 和 LS。"""
+        from factor_framework.pipeline import _resample_monthly
+        from factor_framework.backtest import layer_backtest
+
+        fp, rp = self._make_panels(n_dates=120, n_stocks=12)
+        fp_m, rp_m = _resample_monthly(fp, rp)
+
+        lr = layer_backtest(fp_m, rp_m, n_groups=5, direction=1)
+        assert 'Q1' in lr.columns, 'layer_backtest 返回应含 Q1 列'
+        assert 'LS' in lr.columns, 'layer_backtest 返回应含 LS 列'
+        assert len(lr) == len(fp_m), \
+            f'layer_backtest 返回行数({len(lr)})应等于月频面板行数({len(fp_m)})'
+
+    # ------------------------------------------------------------------ #
+    # BUG 14 — _annual_return / long_short_stats 月频年化 (periods=12)    #
+    # ------------------------------------------------------------------ #
+
+    def test_bug14_annual_return_monthly_formula(self):
+        """_annual_return 月频：恒定月收益率 r 的年化应为 (1+r)^12 - 1。"""
+        from factor_framework.backtest import _annual_return
+
+        r = 0.02  # 2% per month
+        n = 24    # 24 个月
+        series = pd.Series([r] * n)
+        annual = _annual_return(series, periods_per_year=12)
+        expected = (1 + r) ** 12 - 1
+
+        assert abs(annual - expected) < 1e-10, \
+            f'月频年化收益应为 (1+r)^12-1={expected:.6f}，实际 {annual:.6f}'
+
+    def test_bug14_long_short_stats_returns_dict_with_keys(self):
+        """long_short_stats 应返回 dict，且包含所有预期键。"""
+        from factor_framework.backtest import layer_backtest, long_short_stats
+        from factor_framework.pipeline import _resample_monthly
+
+        fp, rp = self._make_panels(n_dates=120, n_stocks=12)
+        fp_m, rp_m = _resample_monthly(fp, rp)
+        lr = layer_backtest(fp_m, rp_m, n_groups=5, direction=1)
+        stats = long_short_stats(lr, periods_per_year=12, rf=0.0)
+
+        assert isinstance(stats, dict), \
+            f'long_short_stats 应返回 dict，实际 {type(stats)}'
+        for k in ('layer_annual_return', 'layer_sharpe', 'ls_annual_return',
+                  'ls_sharpe', 'ls_max_drawdown', 'ls_calmar',
+                  'ls_win_rate', 'monotone_score', 'nav'):
+            assert k in stats, f'long_short_stats 结果应含键 "{k}"'
+
+    def test_bug14_layer_annual_return_is_series_in_range(self):
+        """layer_annual_return 应是 pd.Series，且各层年化收益在合理范围内。"""
+        from factor_framework.backtest import layer_backtest, long_short_stats
+        from factor_framework.pipeline import _resample_monthly
+
+        fp, rp = self._make_panels(n_dates=120, n_stocks=12)
+        fp_m, rp_m = _resample_monthly(fp, rp)
+        lr = layer_backtest(fp_m, rp_m, n_groups=5, direction=1)
+        stats = long_short_stats(lr, periods_per_year=12, rf=0.0)
+
+        layer_ann = stats['layer_annual_return']
+        assert isinstance(layer_ann, pd.Series), \
+            'layer_annual_return 应是 pd.Series'
+        valid = layer_ann.dropna()
+        assert len(valid) > 0, '应有至少一个有效分层年化收益'
+        for v in valid:
+            assert v > -1.0, f'年化收益 {v:.4f} 不应低于 -100%'
+            assert v < 5.0,  f'年化收益 {v:.4f} 不应超过 500%（合理性检查）'
+
+    # ------------------------------------------------------------------ #
+    # BUG 15 — 月频换手率序列长度 < 日频                                   #
+    # ------------------------------------------------------------------ #
+
+    def test_bug15_turnover_analysis_returns_dict(self):
+        """turnover_analysis 应返回 dict，含 avg_turnover、turnover_series 等键。"""
+        from factor_framework.backtest import turnover_analysis
+
+        fp, _ = self._make_panels(n_dates=120, n_stocks=12)
+        to = turnover_analysis(fp, n_groups=5, direction=1)
+
+        assert isinstance(to, dict), \
+            f'turnover_analysis 应返回 dict，实际 {type(to)}'
+        assert 'avg_turnover' in to, '结果应含 avg_turnover 键'
+        assert 'turnover_series' in to, '结果应含 turnover_series 键'
+        assert isinstance(to['turnover_series'], pd.Series), \
+            'turnover_series 应是 pd.Series'
+
+    def test_bug15_monthly_turnover_fewer_observations(self):
+        """月频面板的换手率序列长度应少于日频面板（月频调仓次数更少）。"""
+        from factor_framework.pipeline import _resample_monthly
+        from factor_framework.backtest import turnover_analysis
+
+        fp, rp = self._make_panels(n_dates=120, n_stocks=12)
+        fp_m, _ = _resample_monthly(fp, rp)
+
+        to_d = turnover_analysis(fp,   n_groups=5, direction=1)
+        to_m = turnover_analysis(fp_m, n_groups=5, direction=1)
+
+        n_daily   = len(to_d['turnover_series'])
+        n_monthly = len(to_m['turnover_series'])
+        assert n_monthly < n_daily, \
+            f'月频换手序列长度({n_monthly})应小于日频({n_daily})'
+
+    def test_bug15_avg_turnover_in_valid_range(self):
+        """月频 avg_turnover 应在 [0, 1] 范围内。"""
+        from factor_framework.pipeline import _resample_monthly
+        from factor_framework.backtest import turnover_analysis
+
+        fp, rp = self._make_panels(n_dates=120, n_stocks=12)
+        fp_m, _ = _resample_monthly(fp, rp)
+
+        to_m = turnover_analysis(fp_m, n_groups=5, direction=1)
+        avg = to_m['avg_turnover']
+
+        assert avg >= 0.0, f'avg_turnover={avg:.4f} 不应为负'
+        assert avg <= 1.0, f'avg_turnover={avg:.4f} 不应超过 1（100% 换仓）'
+
