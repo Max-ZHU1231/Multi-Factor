@@ -196,10 +196,6 @@ def clean_stock_df(
             if 0 < miss_rate < MISSING_RANDOM:
                 df[col] = df[col].fillna(df[col].median())
 
-        # 4d. 第二次 MAD Winsorize（填充后可能引入新极值，再清洗一次）
-        df[col], w2 = _try_winsorize(df[col])
-        winsorized_this = winsorized_this or w2
-
         if winsorized_this:
             winsorized_cols.append(col)
 

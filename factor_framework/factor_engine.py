@@ -401,11 +401,12 @@ class FactorEngine:
 
     def compute_single(
         self,
-        symbol:      str,
-        factor_name: str,
-        start:       Optional[str] = None,
-        end:         Optional[str] = None,
-        fast_mode:   bool = False,
+        symbol:       str,
+        factor_name:  str,
+        start:        Optional[str] = None,
+        end:          Optional[str] = None,
+        fast_mode:    bool = False,
+        max_lookback: int  = 0,
     ) -> Optional[pd.Series]:
         """
         计算单只股票的因子值序列。
@@ -417,8 +418,11 @@ class FactorEngine:
 
         Parameters
         ----------
-        fast_mode : True = 使用轻量加载器（跳过 MAD Winsorize，速度 ~3x）；
-                    False = 使用完整 load_and_clean（含 MAD Winsorize）
+        fast_mode    : True = 使用轻量加载器（跳过 MAD Winsorize，速度 ~3x）；
+                       False = 使用完整 load_and_clean（含 MAD Winsorize）
+        max_lookback : warm-up 期长度（交易日数）。若 > 0，计算时会向 start 之前
+                       多加载 max_lookback 行数据以避免因子冷启动偏差，输出时再
+                       截断回 [start, end]。0 = 不使用 warm-up（默认，向后兼容）。
 
         Returns
         -------
@@ -428,12 +432,14 @@ class FactorEngine:
             raise KeyError(f"因子 '{factor_name}' 未注册，请先调用 register()。")
 
         # 最终因子缓存命中（两层缓存：第一层按 symbol+factor_name）
+        # 注意：启用 max_lookback 时跳过缓存（截断边界不同，防止缓存污染）
         fc_key = f"{factor_name}|{symbol}"
-        cached = self._factor_cache.get(fc_key)
-        if cached is not _MISS_SENTINEL:
-            if start or end:
-                return _date_filter(cached, start, end)
-            return cached
+        if max_lookback == 0:
+            cached = self._factor_cache.get(fc_key)
+            if cached is not _MISS_SENTINEL:
+                if start or end:
+                    return _date_filter(cached, start, end)
+                return cached
 
         # 记录编译路径元数据（仅首次）
         self._resolve_compile_target(factor_name)
@@ -443,17 +449,35 @@ class FactorEngine:
         if df is None:
             return None
 
-        # 在完整 df 上计算（保证缓存的是全序列，date filter 在输出时动态切片）
+        # ── warm-up 截断：计算时向前扩展，输出时截断回原始 start ─────────────
+        # 只在 start 有效且 max_lookback > 0 时生效；全量计算时不做截断。
+        warm_start: Optional[str] = None
+        if start and max_lookback > 0:
+            all_dates = sorted(df[COL_DATE].values)
+            try:
+                start_pos = np.searchsorted(all_dates, start, side="left")
+                warm_pos  = max(0, start_pos - max_lookback)
+                warm_start = all_dates[warm_pos]
+            except Exception:
+                pass  # 降级：使用全量 df
+
+        if warm_start is not None and warm_start < start:
+            df_compute = df[df[COL_DATE] >= warm_start].copy()
+            df_compute = df_compute.reset_index(drop=True)
+        else:
+            df_compute = df
+
+        # 在 df_compute 上计算（含 warm-up 期，保证因子窗口完整）
         # ── Expr DAG 路径 ────────────────────────────────────────────────────
         if factor_name in self._expr_registry:
-            result = self._compute_expr_single(symbol, factor_name, df)
+            result = self._compute_expr_single(symbol, factor_name, df_compute)
         # ── 显式依赖路径 ────────────────────────────────────────────────────
         elif self._dep_graph.deps_of(factor_name):
-            result = self._compute_with_deps(symbol, factor_name, df, fast_mode, None, None)
+            result = self._compute_with_deps(symbol, factor_name, df_compute, fast_mode, None, None)
         # ── 普通 lambda 路径 ─────────────────────────────────────────────────
         else:
             try:
-                result = self._registry[factor_name](df)
+                result = self._registry[factor_name](df_compute)
             except Exception as e:
                 warnings.warn(f"{symbol}/{factor_name} 计算失败: {e}")
                 return None
@@ -462,11 +486,12 @@ class FactorEngine:
             return None
 
         result = result.copy()
-        result.index = df[COL_DATE].values
+        result.index = df_compute[COL_DATE].values
         result.name  = symbol
 
-        # 写入最终因子缓存（全序列，不含日期筛选）
-        self._factor_cache.put(fc_key, result)
+        # 仅无 warm-up 时写入全序列因子缓存（warm-up 模式不缓存以防截断不一致）
+        if max_lookback == 0:
+            self._factor_cache.put(fc_key, result)
 
         # 返回时动态切片
         if start or end:
@@ -531,24 +556,26 @@ class FactorEngine:
 
     def build_panel(
         self,
-        factor_name: str,
-        start:       Optional[str] = None,
-        end:         Optional[str] = None,
-        symbols:     Optional[List[str]] = None,
-        n_jobs:      int = 8,
-        fast_mode:   bool = True,
+        factor_name:  str,
+        start:        Optional[str] = None,
+        end:          Optional[str] = None,
+        symbols:      Optional[List[str]] = None,
+        n_jobs:       int = 8,
+        fast_mode:    bool = True,
+        max_lookback: int  = 0,
     ) -> pd.DataFrame:
         """
         批量计算所有股票的因子值，构建 (日期 × 股票) 面板。
 
         Parameters
         ----------
-        factor_name : 因子名称（已注册）
-        start / end : 日期范围（YYYYMMDD 字符串，含端点）
-        symbols     : 指定股票列表（None = 全部）
-        n_jobs      : 并行线程数（默认 8）
-        fast_mode   : True = 跳过 MAD Winsorize，速度 ~3x（默认）；
-                      False = 使用完整清洗（更准确，更慢）
+        factor_name  : 因子名称（已注册）
+        start / end  : 日期范围（YYYYMMDD 字符串，含端点）
+        symbols      : 指定股票列表（None = 全部）
+        n_jobs       : 并行线程数（默认 8）
+        fast_mode    : True = 跳过 MAD Winsorize，速度 ~3x（默认）；
+                       False = 使用完整清洗（更准确，更慢）
+        max_lookback : warm-up 期长度（交易日数），传递给 compute_single()
 
         Returns
         -------
@@ -560,7 +587,12 @@ class FactorEngine:
         pbar = tqdm(total=len(targets), desc=f"计算 {factor_name}", disable=not self.verbose)
 
         def _compute(sym: str) -> Optional[pd.Series]:
-            return self.compute_single(sym, factor_name, start=start, end=end, fast_mode=fast_mode)
+            return self.compute_single(
+                sym, factor_name,
+                start=start, end=end,
+                fast_mode=fast_mode,
+                max_lookback=max_lookback,
+            )
 
         with ThreadPoolExecutor(max_workers=n_jobs) as executor:
             future_to_sym = {executor.submit(_compute, sym): sym for sym in targets}
@@ -771,7 +803,21 @@ class FactorEngine:
         -------
         与 panel 等形状的横截面处理后面板
         """
-        result_rows = {}
+        # ── 快速路径：无 industry，尝试 panel.apply(axis=1) ───────────────────
+        if industry is None:
+            try:
+                result = panel.apply(cs_func, axis=1)
+                # cs_func 可能返回 scalar（如 rank），此时 apply 结果是 Series
+                if isinstance(result, pd.Series):
+                    # 标量输出：通常不是横截面算子的预期用法，降级到逐行
+                    pass
+                else:
+                    return result.reindex(columns=panel.columns)
+            except Exception:
+                pass  # 降级到逐行处理
+
+        # ── 回退路径：逐行处理（industry 参数或 apply 失败时）──────────────
+        result_rows: dict = {}
         for date, row in panel.iterrows():
             x = row.dropna()
             if len(x) == 0:
