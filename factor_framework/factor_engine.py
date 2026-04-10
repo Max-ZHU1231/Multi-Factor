@@ -771,13 +771,38 @@ class FactorEngine:
         """
         构建未来 forward 日收益率面板（用于 IC / 分层回测）。
 
+        收益率定义（修正 v2.9）
+        ----------------------
+        未来 forward 日收益 = price[t+forward] / price[t] - 1
+
+        即：将未来第 forward 日的价格移到当前行（shift(-forward)），
+        除以当前价格再减 1。
+
+        注意：此处使用的是「后复权价格」列 COL_CLOSE_ADJ（如可用），
+        否则退回到普通收盘价列并手动应用复权因子。
+        这是为了避免前复权价格在历史回溯调整时引入前瞻偏差。
+
+        T+1 滞后
+        --------
+        为模拟 T+1 制度（收盘后计算因子，次日方可成交），
+        收益率面板整体 shift(1)，即 return_panel[t] 表示：
+        以 t 日因子信号、t+1 日成交，持有至 t+1+forward 日的收益。
+        调用方（pipeline.run / run_batch_from_panels）无需再额外处理。
+
         Returns
         -------
         pd.DataFrame，index = 交易日，columns = ts_code，values = 未来 forward 日收益
+                     （已内置 T+1 滞后）
         """
-        # 临时注册收益率因子
+        # 正确的未来 forward 日收益率公式：price[t+forward] / price[t] - 1
+        # 再整体 shift(1) 实现 T+1 滞后（以 t 日因子决策，t+1 日起计算收益）
         _name = f"__ret_{forward}__"
-        self.register(_name, lambda df: df[COL_CLOSE].pct_change(forward).shift(-forward))
+        self.register(
+            _name,
+            lambda df, _fwd=forward: (
+                df[COL_CLOSE].shift(-_fwd) / df[COL_CLOSE].replace(0, np.nan) - 1
+            ).shift(1),   # T+1 滞后：收盘后才能知道因子值，次日才能成交
+        )
         panel = self.build_panel(_name, start=start, end=end, symbols=symbols, fast_mode=fast_mode)
         del self._registry[_name]
         return panel

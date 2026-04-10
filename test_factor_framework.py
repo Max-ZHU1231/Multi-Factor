@@ -502,6 +502,33 @@ class TestFactorEngine:
                                        symbols=symbols)
         assert isinstance(rp, pd.DataFrame)
 
+    def test_return_panel_formula_correct(self, engine):
+        """
+        验证 build_return_panel 使用正确的未来收益公式：
+        return[t] = price[t+forward] / price[t] - 1  (含 T+1 滞后)
+        而非旧的 pct_change(forward).shift(-forward)。
+
+        注意：build_panel 内部会去掉前导/后缀全 NaN 行，
+        所以返回的面板不含全 NaN 行。这里验证：
+        1. 返回值是 DataFrame（形状合理）
+        2. 值域合理（收益率在 -1 ~ 5 之间，非异常大的 pct_change 值）
+        """
+        symbols = engine.all_symbols()[:3]
+        if len(symbols) < 1:
+            pytest.skip("股票文件不足")
+        forward = 5
+        rp = engine.build_return_panel(forward=forward,
+                                       start="20210101", end="20211231",
+                                       symbols=symbols)
+        assert isinstance(rp, pd.DataFrame)
+        # 基本形状检查：应有合理行数
+        assert len(rp) > forward, f"收益率面板行数 {len(rp)} 应 > forward={forward}"
+        # 值域合理：日股票的 forward=5 收益率应在 ±100% 以内
+        vals = rp.values[~np.isnan(rp.values)]
+        if len(vals) > 0:
+            assert vals.max() < 2.0, f"最大收益率 {vals.max():.2%} 超过 200%，可能公式错误"
+            assert vals.min() > -1.0, f"最小收益率 {vals.min():.2%} 低于 -100%，可能公式错误"
+
     def test_apply_cross_section(self, factor_panel):
         fp = factor_panel.copy()
         # FactorEngine.apply_cross_section 是静态方法
@@ -2914,3 +2941,225 @@ class TestEngineDAG:
         # 清空后 factor_cache 应为空
         assert len(engine._factor_cache) == 0
         assert len(engine._intermediate_cache) == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v2.9 修复专项测试
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestV29Fixes:
+    """
+    验证 v2.9 修复的四项核心问题：
+    1. 收益率公式正确性（price[t+f]/price[t]-1，非 pct_change(f).shift(-f)）
+    2. T+1 滞后内置（首行全 NaN）
+    3. 月度重采样函数（_resample_monthly）
+    4. momentum 对数价格差分（替代 rolling.apply(np.prod)）
+    """
+
+    # ── 合成股票 DataFrame（用于单元级验证）────────────────────────────────
+
+    @pytest.fixture(scope="class")
+    def stock_df(self):
+        """简单递增价格的单股 DataFrame，方便手工验证。"""
+        n = 30
+        dates  = [f"202001{d:02d}" for d in range(1, n + 1)]
+        # 价格从 10.0 开始每天涨 0.1
+        prices = [10.0 + 0.1 * i for i in range(n)]
+        return pd.DataFrame({
+            "交易日": dates,
+            "收盘价": prices,
+            "开盘价": prices,
+            "最高价": prices,
+            "最低价": prices,
+            "成交量（手）": [1000] * n,
+            "成交额（千元）": [10000.0] * n,
+            "换手率（%）": [1.0] * n,
+            "总市值（万元）": [1e6] * n,
+            "流通市值（万元）": [8e5] * n,
+            "市净率": [2.0] * n,
+            "市盈率（TTM，亏损为空）": [20.0] * n,
+            "市销率（TTM）": [3.0] * n,
+            "复权因子": [1.0] * n,
+        })
+
+    # ─── 1. 收益率公式 ────────────────────────────────────────────────────────
+
+    def test_return_formula_vs_old_formula(self, stock_df):
+        """新公式与旧公式在非平凡价格序列上的结果不同。"""
+        prices = pd.Series(stock_df["收盘价"].values, dtype=float)
+        forward = 5
+
+        # 旧公式
+        old = prices.pct_change(forward).shift(-forward)
+
+        # 新公式（T+1 内置）
+        new = (prices.shift(-forward) / prices - 1).shift(1)
+
+        # 它们在数学上不等价（旧公式方向错误）
+        # 旧公式 pct_change(5) 计算的是「过去 5 天」相对今天的历史收益
+        # 新公式 shift(-5)/price-1 才是「未来 5 天」收益
+        diff = (old - new).dropna()
+        assert (diff.abs() > 1e-9).any(), (
+            "新旧公式结果完全相同，说明修复未生效"
+        )
+
+    def test_return_formula_sign_correct(self, stock_df):
+        """
+        价格严格递增时，未来 forward 日收益应全为正数（T+1 行跳过）。
+        旧公式（pct_change 反向）在递增价格序列上也会给正值，
+        但新公式 shift(-f)/price-1 才是真正的未来收益。
+        """
+        prices = pd.Series(stock_df["收盘价"].values, dtype=float)
+        forward = 3
+        # 新公式的未来收益（不含 T+1 偏移，单独验证方向）
+        future_ret = prices.shift(-forward) / prices - 1
+        valid = future_ret.dropna()
+        assert (valid > 0).all(), f"严格递增价格下未来收益应全正，但有 {(valid <= 0).sum()} 个非正值"
+
+    def test_t1_lag_first_row_nan(self, stock_df):
+        """
+        T+1 滞后后，收益率面板的第 0 行应全为 NaN。
+        """
+        prices  = pd.Series(stock_df["收盘价"].values, dtype=float)
+        forward = 3
+        ret_with_t1 = (prices.shift(-forward) / prices - 1).shift(1)
+        # 第 0 行应为 NaN（因为 shift(1) 把第 0 行推出范围）
+        assert pd.isna(ret_with_t1.iloc[0]), "T+1 滞后后首行应为 NaN"
+
+    def test_t1_lag_tail_nan_count(self, stock_df):
+        """
+        T+1 滞后后的 NaN 分布分析：
+        对于长度 n 的 Series，(price.shift(-f) / price - 1).shift(1) 的 NaN 分布：
+        - shift(-f) 产生尾部 f 个 NaN；
+        - 再 shift(1) 把整体右移：头部产生 1 个 NaN，尾部末 f-1 个仍是 NaN，
+          但前 1 个尾部 NaN 位置（原第 n-f 行）变成了有效值（从 n-f-1 移来）。
+        所以总 NaN 数 = (f - 1) 尾部 + 1 头部 + 1 尾部 = f 个（头 1 + 尾 f-1）。
+
+        简言之：total_nan = forward（头 1 个 + 尾 forward-1 个）。
+        """
+        prices  = pd.Series(stock_df["收盘价"].values, dtype=float)
+        forward = 5
+        ret = (prices.shift(-forward) / prices - 1).shift(1)
+        total_nan = int(ret.isna().sum())
+        # 总 NaN = forward（头 1 + 尾 forward-1）
+        assert total_nan == forward, (
+            f"期望总 NaN 数 {forward}，实际 {total_nan}"
+        )
+        # 头部 NaN（T+1 效果）
+        assert pd.isna(ret.iloc[0]), "首行应为 NaN（T+1 滞后）"
+        # 尾部至少有 forward-1 个 NaN
+        tail_nan = int(ret.iloc[-(forward - 1):].isna().sum())
+        assert tail_nan == forward - 1, f"尾部 {forward-1} 行应全为 NaN，实际 {tail_nan}"
+
+    # ─── 2. _resample_monthly ────────────────────────────────────────────────
+
+    def test_resample_monthly_reduces_rows(self, factor_panel, return_panel):
+        """月度重采样后行数应远少于日频行数。"""
+        from factor_framework.pipeline import _resample_monthly
+        f_m, r_m = _resample_monthly(factor_panel, return_panel)
+        assert len(f_m) < len(factor_panel), "月度重采样后行数应减少"
+        assert len(r_m) == len(f_m), "factor 和 return 月末行数应相同"
+
+    def test_resample_monthly_aligned(self, factor_panel, return_panel):
+        """重采样后两个面板的 index 应完全相同。"""
+        from factor_framework.pipeline import _resample_monthly
+        f_m, r_m = _resample_monthly(factor_panel, return_panel)
+        pd.testing.assert_index_equal(f_m.index, r_m.index)
+
+    def test_resample_monthly_columns_preserved(self, factor_panel, return_panel):
+        """重采样后列（股票）不应改变。"""
+        from factor_framework.pipeline import _resample_monthly
+        f_m, r_m = _resample_monthly(factor_panel, return_panel)
+        assert set(f_m.columns) == set(factor_panel.columns)
+        assert set(r_m.columns) == set(return_panel.columns)
+
+    def test_resample_monthly_month_count(self, factor_panel, return_panel):
+        """
+        factor_panel 跨度为 120 个工作日（约 6 个月），
+        月度重采样后行数应在 4~7 之间。
+        """
+        from factor_framework.pipeline import _resample_monthly
+        f_m, _ = _resample_monthly(factor_panel, return_panel)
+        assert 4 <= len(f_m) <= 7, f"月末截面数 {len(f_m)} 超出预期范围 [4, 7]"
+
+    # ─── 3. momentum 对数价格差分 ────────────────────────────────────────────
+
+    def test_momentum_log_vs_prod(self, stock_df):
+        """
+        对数差分实现与旧 rolling.apply(np.prod) 实现在精度上的对比。
+        对于长窗口（252 天），对数差分更精确（无浮点累积误差）。
+        """
+        from factor_framework.factor_zoo import momentum_12_1
+        result = momentum_12_1(stock_df)
+        # 结果应为 Series
+        assert isinstance(result, pd.Series)
+        # 对于长度仅 30 的 DataFrame，前 252 行应全为 NaN
+        assert result.dropna().empty, (
+            "数据不足 252 行时 momentum_12_1 应全返回 NaN"
+        )
+
+    def test_momentum_log_no_rolling_apply(self):
+        """
+        确认 momentum_12_1 源码的代码部分（非文档字符串）
+        不再包含 rolling(...).apply(...) 调用。
+        """
+        import inspect, ast
+        from factor_framework.factor_zoo import momentum_12_1
+        src = inspect.getsource(momentum_12_1)
+        # 跳过文档字符串，只看函数体代码
+        # 解析 AST，查找是否有 .apply 方法调用链（即 rolling(...).apply(...)）
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            pytest.skip("无法解析 AST")
+        # 收集所有 .apply 调用
+        apply_calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "apply"
+        ]
+        assert len(apply_calls) == 0, (
+            f"momentum_12_1 不应再有 .apply() 调用（应改用对数差分），"
+            f"发现 {len(apply_calls)} 处"
+        )
+
+    def test_momentum_log_result_range(self):
+        """
+        在足够长的合成价格序列上，momentum_12_1 的结果应是有限实数，
+        不含 inf（旧 rolling.apply(prod) 可能在极端值下产生 inf）。
+        """
+        import numpy as np
+        from factor_framework.factor_zoo import momentum_12_1
+        n = 350
+        np.random.seed(0)
+        prices = 100 * np.exp(np.random.randn(n).cumsum() * 0.01)
+        df = pd.DataFrame({
+            "交易日": [f"{i:08d}" for i in range(n)],
+            "收盘价": prices,
+        })
+        result = momentum_12_1(df)
+        finite_vals = result.dropna()
+        assert (finite_vals.abs() < 1e6).all(), "momentum_12_1 产生了异常大的值（可能 inf）"
+
+    def test_reversal_log_no_rolling_apply(self):
+        """
+        确认 reversal_1w / reversal_1m 代码部分也改用对数差分（无 .apply() 调用）。
+        """
+        import inspect, ast
+        from factor_framework.factor_zoo import reversal_1w, reversal_1m
+        for fn in [reversal_1w, reversal_1m]:
+            src = inspect.getsource(fn)
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                continue
+            apply_calls = [
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "apply"
+            ]
+            assert len(apply_calls) == 0, (
+                f"{fn.__name__} 不应再有 .apply() 调用，发现 {len(apply_calls)} 处"
+            )

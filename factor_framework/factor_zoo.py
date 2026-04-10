@@ -62,25 +62,38 @@ def momentum_12_1(df: pd.DataFrame) -> pd.Series:
     """
     经典 12-1 月动量：过去 252 个交易日收益率 - 过去 21 个交易日收益率
     （跳过最近 1 个月，规避短期反转）。
+
+    实现（v2.9 修正）：用对数价格差分替代 rolling.apply(np.prod)。
+    log(p[t] / p[t-n]) = log(p[t]) - log(p[t-n])，精度更高、速度更快。
+    最后用 exp(x) - 1 换算回简单收益率。
     """
-    r = _ret(df)
-    mom_12 = (1 + r).rolling(252, min_periods=200).apply(np.prod, raw=True) - 1
-    mom_1  = (1 + r).rolling(21,  min_periods=15).apply(np.prod, raw=True) - 1
-    return mom_12 - mom_1
+    log_p  = np.log(df[_C].replace(0, np.nan))
+    mom_12 = np.exp(log_p - log_p.shift(252)) - 1
+    mom_1  = np.exp(log_p - log_p.shift(21))  - 1
+    # 仅保留 warm-up 期足够的有效行
+    valid = log_p.notna() & log_p.shift(252).notna()
+    result = mom_12 - mom_1
+    result[~valid] = np.nan
+    return result
 
 
 def momentum_6_1(df: pd.DataFrame) -> pd.Series:
-    """6-1 月中期动量。"""
-    r      = _ret(df)
-    mom_6  = (1 + r).rolling(126, min_periods=100).apply(np.prod, raw=True) - 1
-    mom_1  = (1 + r).rolling(21,  min_periods=15).apply(np.prod, raw=True) - 1
-    return mom_6 - mom_1
+    """6-1 月中期动量（v2.9：对数价格差分实现）。"""
+    log_p  = np.log(df[_C].replace(0, np.nan))
+    mom_6  = np.exp(log_p - log_p.shift(126)) - 1
+    mom_1  = np.exp(log_p - log_p.shift(21))  - 1
+    valid  = log_p.notna() & log_p.shift(126).notna()
+    result = mom_6 - mom_1
+    result[~valid] = np.nan
+    return result
 
 
 def momentum_1m(df: pd.DataFrame) -> pd.Series:
-    """短期 1 月动量（包含最近 1 月，可用于短期策略）。"""
-    r = _ret(df)
-    return (1 + r).rolling(21, min_periods=15).apply(np.prod, raw=True) - 1
+    """短期 1 月动量（v2.9：对数价格差分实现）。"""
+    log_p  = np.log(df[_C].replace(0, np.nan))
+    result = np.exp(log_p - log_p.shift(21)) - 1
+    result[log_p.shift(21).isna()] = np.nan
+    return result
 
 
 def momentum_52w_high(df: pd.DataFrame) -> pd.Series:
@@ -97,15 +110,17 @@ def momentum_52w_high(df: pd.DataFrame) -> pd.Series:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def reversal_1w(df: pd.DataFrame) -> pd.Series:
-    """短期 1 周反转：过去 5 日收益率的负值（反转信号）。"""
-    r = _ret(df)
-    return -(1 + r).rolling(5, min_periods=3).apply(np.prod, raw=True) + 1
+    """短期 1 周反转：过去 5 日收益率的负值（反转信号，v2.9：对数差分）。"""
+    log_p  = np.log(df[_C].replace(0, np.nan))
+    ret_5  = np.exp(log_p - log_p.shift(5)) - 1
+    return -ret_5
 
 
 def reversal_1m(df: pd.DataFrame) -> pd.Series:
-    """短期 1 月反转：过去 21 日收益率的负值。"""
-    r = _ret(df)
-    return -(1 + r).rolling(21, min_periods=15).apply(np.prod, raw=True) + 1
+    """短期 1 月反转：过去 21 日收益率的负值（v2.9：对数差分）。"""
+    log_p  = np.log(df[_C].replace(0, np.nan))
+    ret_21 = np.exp(log_p - log_p.shift(21)) - 1
+    return -ret_21
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

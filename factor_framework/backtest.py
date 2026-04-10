@@ -13,6 +13,7 @@ backtest.py
 
 from __future__ import annotations
 
+import warnings
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -262,6 +263,14 @@ def turnover_analysis(
             continue
         try:
             labels = pd.qcut(f * direction, n_groups, labels=[f"Q{i+1}" for i in range(n_groups)], duplicates="drop")
+            # 校验：重复值过多时实际分组数可能 < n_groups
+            n_actual = labels.cat.categories.nunique() if hasattr(labels, "cat") else labels.nunique()
+            if n_actual < n_groups:
+                warnings.warn(
+                    f"日期 {date}：因子重复值导致实际分组数 {n_actual} < {n_groups}，"
+                    "该截面换手率统计可能不准确。",
+                    stacklevel=2,
+                )
         except Exception:
             prev_portfolio = set()
             continue

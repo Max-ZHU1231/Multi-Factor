@@ -55,6 +55,65 @@ from factor_framework.optimizer     import equal_weight, icir_weight, print_weig
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 工具函数
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _resample_monthly(
+    factor_panel: pd.DataFrame,
+    return_panel: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    将日频因子面板和收益率面板重采样到月末频率。
+
+    逻辑
+    ----
+    - 取每月最后一个有效交易日的因子值（月末截面）
+    - 对应的收益率面板取同一行（已是月度远期收益，无需再次聚合）
+    - 两个面板按公共月末日期对齐
+
+    这解决了"日频滚动模拟月度换仓导致换手率虚高"的问题：
+    实盘每月换仓一次，而日频回测相当于每天都在换仓。
+    """
+    # 将 index 转为 pandas DatetimeIndex 以便 resample
+    def _to_datetime(idx):
+        # index 可能是 str '20200131' 或已是 datetime
+        if pd.api.types.is_datetime64_any_dtype(idx):
+            return idx
+        try:
+            return pd.to_datetime(idx, format="%Y%m%d")
+        except Exception:
+            return pd.to_datetime(idx)
+
+    f_dt = factor_panel.copy()
+    f_dt.index = _to_datetime(factor_panel.index)
+    r_dt = return_panel.copy()
+    r_dt.index = _to_datetime(return_panel.index)
+
+    # 取每月末最后一个有值的日期（resample('ME').last()）
+    try:
+        f_m = f_dt.resample("ME").last()
+        r_m = r_dt.resample("ME").last()
+    except Exception:
+        # pandas < 2.2 使用 'M'
+        f_m = f_dt.resample("M").last()
+        r_m = r_dt.resample("M").last()
+
+    # 对齐
+    common_idx = f_m.index.intersection(r_m.index)
+    f_m = f_m.loc[common_idx]
+    r_m = r_m.loc[common_idx]
+
+    # 将 index 转回原始字符串格式（与下游兼容）
+    str_idx = f_m.index.strftime("%Y%m%d")
+    f_m.index = str_idx
+    r_m.index = str_idx
+
+    # 去掉全 NaN 行
+    valid = f_m.dropna(how="all").index.intersection(r_m.dropna(how="all").index)
+    return f_m.loc[valid], r_m.loc[valid]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 报告对象
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -263,21 +322,22 @@ class FactorPipeline:
 
     def run(
         self,
-        factor_name:     str,
-        start:           Optional[str] = None,
-        end:             Optional[str] = None,
-        forward:         int = 21,
-        n_groups:        int = 5,
-        direction:       int = 1,
-        standardize:     Optional[str] = "rank",   # 'rank', 'zscore', None
-        neutralize:      bool = False,              # 市值+行业回归中性化
-        winsorize:       bool = True,               # 截面 MAD Winsorize
-        ic_method:       str = "rank",
-        ic_forward_list: List[int] = (1, 5, 10, 21, 60),
-        periods_per_year:int = 252,
-        rf:              float = 0.0,
-        cost_per_side:   float = 0.002,
-        symbols:         Optional[List[str]] = None,
+        factor_name:      str,
+        start:            Optional[str] = None,
+        end:              Optional[str] = None,
+        forward:          int = 21,
+        n_groups:         int = 5,
+        direction:        int = 1,
+        standardize:      Optional[str] = "rank",   # 'rank', 'zscore', None
+        neutralize:       bool = False,              # 市值+行业回归中性化
+        winsorize:        bool = True,               # 截面 MAD Winsorize
+        ic_method:        str = "rank",
+        ic_forward_list:  List[int] = (1, 5, 10, 21, 60),
+        periods_per_year: int = 252,
+        rf:               float = 0.0,
+        cost_per_side:    float = 0.002,
+        symbols:          Optional[List[str]] = None,
+        resample_monthly: bool = True,               # 月度重采样（推荐）
     ) -> FactorReport:
         """
         执行完整的因子检验流程。
@@ -294,10 +354,12 @@ class FactorPipeline:
         winsorize        : 是否先做截面 MAD Winsorize
         ic_method        : IC 计算方式（'rank' 或 'normal'）
         ic_forward_list  : IC 衰减分析的预测期列表
-        periods_per_year : 年化期数
+        periods_per_year : 年化期数（月度重采样后应传 12）
         rf               : 无风险利率（年化）
         cost_per_side    : 单边交易成本
         symbols          : 指定股票列表（None = 全部）
+        resample_monthly : True = 每月末重采样一次（避免日频滚动模拟月度换仓，
+                           换手率虚高）；False = 保留日频（适合短期因子）
 
         Returns
         -------
@@ -312,22 +374,29 @@ class FactorPipeline:
 
         print(f"      因子面板: {factor_panel.shape[0]} 个交易日 × {factor_panel.shape[1]} 只股票")
 
-        print(f"\n[2/6] 构建收益率面板（forward={forward}天）...")
+        print(f"\n[2/6] 构建收益率面板（forward={forward}天，T+1 已内置）...")
         return_panel = self.engine.build_return_panel(
             forward=forward, start=start, end=end, symbols=symbols
         )
 
-        # ── 截断尾部 NaN（因子期 shift(-forward) 导致最后 forward 行无效）──
+        # ── 截断尾部 NaN（forward+1 行因 shift(-forward).shift(1) 无效）────
+        # build_return_panel 内置 T+1 shift，尾部共 forward+1 行为全 NaN
         valid_ret_idx = return_panel.dropna(how="all").index
         n_dropped = len(return_panel) - len(valid_ret_idx)
         if n_dropped > 0:
             warnings.warn(
-                f"[尾部截断] return_panel 末尾 {n_dropped} 个交易日因 "
-                f"forward={forward} 天 shift 导致收益率全为 NaN，"
-                f"已同步截断 factor_panel 的对应行以避免无效计算。"
+                f"[尾部截断] return_panel 末尾 {n_dropped} 个交易日（含 T+1 滞后）"
+                f"全为 NaN，已同步截断 factor_panel 对应行。"
             )
             return_panel = return_panel.loc[valid_ret_idx]
-            factor_panel = factor_panel.reindex(valid_ret_idx)
+            factor_panel = factor_panel.loc[factor_panel.index.intersection(valid_ret_idx)]
+
+        # ── 月度重采样（可选）────────────────────────────────────────────────
+        # 对 factor_panel / return_panel 按月末对齐，避免日频滚动模拟月度换仓
+        # 导致的换手率虚高问题。
+        if resample_monthly:
+            factor_panel, return_panel = _resample_monthly(factor_panel, return_panel)
+            print(f"      [月度重采样] {factor_panel.shape[0]} 个月末截面")
 
         # ── 截面预处理 ──────────────────────────────────────────────────────
         print(f"\n[3/6] 截面预处理（winsorize={winsorize}, standardize={standardize}, neutralize={neutralize}）...")
@@ -405,20 +474,21 @@ class FactorPipeline:
 
     def run_batch_from_panels(
         self,
-        factor_panels:   Dict[str, pd.DataFrame],
-        return_panel:    pd.DataFrame,
-        close_panel:     pd.DataFrame,
-        forward:         int = 21,
-        n_groups:        int = 5,
-        direction:       int = 1,
-        standardize:     Optional[str] = "rank",
-        neutralize:      bool = False,
-        winsorize:       bool = True,
-        ic_method:       str = "rank",
-        ic_forward_list: List[int] = (1, 5, 10, 21, 60),
+        factor_panels:    Dict[str, pd.DataFrame],
+        return_panel:     pd.DataFrame,
+        close_panel:      pd.DataFrame,
+        forward:          int = 21,
+        n_groups:         int = 5,
+        direction:        int = 1,
+        standardize:      Optional[str] = "rank",
+        neutralize:       bool = False,
+        winsorize:        bool = True,
+        ic_method:        str = "rank",
+        ic_forward_list:  List[int] = (1, 5, 10, 21, 60),
         periods_per_year: int = 252,
-        rf:              float = 0.0,
-        cost_per_side:   float = 0.002,
+        rf:               float = 0.0,
+        cost_per_side:    float = 0.002,
+        resample_monthly: bool = True,
     ) -> Dict[str, "FactorReport"]:
         """
         对已预构建的因子面板字典批量执行检验流程（无重复读盘）。
@@ -430,23 +500,23 @@ class FactorPipeline:
 
         Parameters
         ----------
-        factor_panels   : {factor_name: raw_factor_panel}（build_panel_batch 的输出）
-        return_panel    : 已构建的未来收益率面板
-        close_panel     : 已构建的收盘价面板（用于 IC 衰减）
-        其余参数        : 同 run()
+        factor_panels    : {factor_name: raw_factor_panel}（build_panel_batch 的输出）
+        return_panel     : 已构建的未来收益率面板（来自 build_return_panel，含 T+1 滞后）
+        close_panel      : 已构建的收盘价面板（用于 IC 衰减）
+        resample_monthly : True = 月度重采样（推荐，与 forward=21 月度换仓语义一致）
+        其余参数         : 同 run()
 
         Returns
         -------
         dict: {factor_name: FactorReport}
         """
-        # 截断尾部 NaN（一次性对齐，所有因子共用）
+        # 截断尾部 NaN（一次性对齐，所有因子共用；T+1 内置后尾部多 1 行 NaN）
         valid_ret_idx = return_panel.dropna(how="all").index
         n_dropped = len(return_panel) - len(valid_ret_idx)
         if n_dropped > 0:
             warnings.warn(
-                f"[尾部截断] return_panel 末尾 {n_dropped} 个交易日因 "
-                f"forward={forward} 天 shift 导致收益率全为 NaN，"
-                f"已同步截断所有因子面板对应行。"
+                f"[尾部截断] return_panel 末尾 {n_dropped} 个交易日（含 T+1 滞后）"
+                f"全为 NaN，已同步截断所有因子面板对应行。"
             )
             return_panel = return_panel.loc[valid_ret_idx]
 
@@ -459,8 +529,14 @@ class FactorPipeline:
                 if raw_panel.empty:
                     raise ValueError("因子面板为空")
 
-                # 对齐尾部截断
-                factor_panel = raw_panel.reindex(valid_ret_idx)
+                # 对齐尾部截断（用 loc+intersection 避免 reindex 引入幽灵 NaN 行）
+                common_idx   = raw_panel.index.intersection(valid_ret_idx)
+                factor_panel = raw_panel.loc[common_idx]
+                ret_panel    = return_panel.loc[common_idx]
+
+                # ── 月度重采样（每因子独立，return_panel 共享同一月末对齐）──
+                if resample_monthly:
+                    factor_panel, ret_panel = _resample_monthly(factor_panel, ret_panel)
 
                 # ── 截面预处理 ──────────────────────────────────────────────
                 if winsorize:
@@ -483,7 +559,7 @@ class FactorPipeline:
                     factor_panel = self.engine.apply_cross_section(factor_panel, cs_zscore)
 
                 # ── IC 分析 ─────────────────────────────────────────────────
-                ic_series   = compute_ic(factor_panel, return_panel, method=ic_method)
+                ic_series   = compute_ic(factor_panel, ret_panel, method=ic_method)
                 ic_s        = ic_stats(ic_series, annualize_periods=periods_per_year)
                 ic_nw       = ic_significance(
                     ic_series, lags=max(1, int(len(ic_series) ** 0.25))
@@ -495,7 +571,7 @@ class FactorPipeline:
 
                 # ── 分层回测 ────────────────────────────────────────────────
                 layer_ret = layer_backtest(
-                    factor_panel, return_panel,
+                    factor_panel, ret_panel,
                     n_groups=n_groups, direction=direction,
                 )
                 ls_stats_ = long_short_stats(
@@ -518,7 +594,7 @@ class FactorPipeline:
                     ls_stats     = ls_stats_,
                     turnover     = turnover_,
                     factor_panel = factor_panel,
-                    return_panel = return_panel,
+                    return_panel = ret_panel,
                 )
             except Exception as exc:
                 warnings.warn(f"因子 '{factor_name}' 检验失败: {exc}")
