@@ -52,6 +52,8 @@ from factor_framework.backtest      import layer_backtest, long_short_stats, tur
 from factor_framework.neutralize    import neutralize_regression, neutralize_industry_zscore
 from factor_framework.operators     import cs_rank, cs_zscore, cs_winsorize
 from factor_framework.optimizer     import equal_weight, icir_weight, print_weights
+from factor_framework.engine.cache         import CacheLayer
+from factor_framework.engine.panel_builder import PanelBuilder
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -274,25 +276,48 @@ class FactorPipeline:
 
     Parameters
     ----------
-    stocks_dir  : Stocks/ 目录路径
-    stock_basic : 股票列表 CSV（含 ts_code, industry 列）
-    min_rows    : 新股最少有效行数
-    verbose     : 显示进度条
+    stocks_dir   : Stocks/ 目录路径
+    stock_basic  : 股票列表 CSV（含 ts_code, industry 列）
+    min_rows     : 新股最少有效行数
+    verbose      : 显示进度条
+    cache_dir    : 磁盘缓存目录（None = 不启用 L2 Parquet 缓存）
+                   指定后，计算超过 5 秒的面板将自动缓存到磁盘，
+                   第二次运行直接从 Parquet 读取，大幅缩短耗时。
+    min_calc_secs: L2 写入阈值（秒）；仅计算超过此时间的面板才写入磁盘
     """
 
     def __init__(
         self,
-        stocks_dir:  str | Path = "Stocks/",
-        stock_basic: str | Path = "股票列表-stock_basic.csv",
-        min_rows:    int = 60,
-        verbose:     bool = True,
+        stocks_dir:    str | Path = "Stocks/",
+        stock_basic:   str | Path = "股票列表-stock_basic.csv",
+        min_rows:      int = 60,
+        verbose:       bool = True,
+        cache_dir:     Optional[str | Path] = None,
+        min_calc_secs: float = 5.0,
     ):
-        self.engine = FactorEngine(
+        # ── 缓存层（可选）────────────────────────────────────────────────────
+        _cache: Optional[CacheLayer] = None
+        if cache_dir is not None:
+            _cache = CacheLayer(
+                cache_dir     = str(cache_dir),
+                stocks_dir    = str(stocks_dir),
+                enabled_l2    = True,
+                min_calc_secs = min_calc_secs,
+            )
+
+        # ── PanelBuilder（含 FactorEngine）────────────────────────────────
+        self._builder = PanelBuilder(
             stocks_dir  = stocks_dir,
             stock_basic = stock_basic,
+            cache       = _cache,
             min_rows    = min_rows,
             verbose     = verbose,
         )
+
+        # ── 向后兼容：self.engine 指向底层 FactorEngine ──────────────────
+        # 所有已有代码（register/apply_cross_section/industry_map 等）
+        # 均通过 self.engine.xxx 访问，保持零改动。
+        self.engine = self._builder.engine
 
     # ── 因子注册 ──────────────────────────────────────────────────────────────
 
@@ -366,7 +391,7 @@ class FactorPipeline:
         FactorReport
         """
         print(f"\n[1/6] 构建因子面板: {factor_name} ...")
-        factor_panel = self.engine.build_panel(
+        factor_panel = self._builder.build_panel(
             factor_name, start=start, end=end, symbols=symbols
         )
         if factor_panel.empty:
@@ -375,7 +400,7 @@ class FactorPipeline:
         print(f"      因子面板: {factor_panel.shape[0]} 个交易日 × {factor_panel.shape[1]} 只股票")
 
         print(f"\n[2/6] 构建收益率面板（forward={forward}天，T+1 已内置）...")
-        return_panel = self.engine.build_return_panel(
+        return_panel = self._builder.build_return_panel(
             forward=forward, start=start, end=end, symbols=symbols
         )
 
@@ -405,7 +430,7 @@ class FactorPipeline:
         if neutralize and self.engine.industry_map is not None:
             # 临时注册市值因子
             self.engine.register("__mktcap__", lambda df: df["总市值（万元）"])
-            mktcap_panel = self.engine.build_panel("__mktcap__", start=start, end=end, symbols=symbols)
+            mktcap_panel = self._builder.build_panel("__mktcap__", start=start, end=end, symbols=symbols)
             del self.engine._registry["__mktcap__"]
             # BUG 11 FIX: 对齐到已截断的日频 factor_panel.index
             mktcap_panel = mktcap_panel.reindex(factor_panel.index)
@@ -431,7 +456,7 @@ class FactorPipeline:
         print(f"\n[4/6] IC 分析（method={ic_method}）...")
         ic_return_panels: Dict[int, pd.DataFrame] = {}
         for _fwd in ic_forward_list:
-            _rp = self.engine.build_return_panel(
+            _rp = self._builder.build_return_panel(
                 forward=_fwd, start=start, end=end, symbols=symbols
             )
             # 截断尾部全 NaN 行（forward+1 行因 T+1 shift 无效）
@@ -543,11 +568,11 @@ class FactorPipeline:
             return_panel = return_panel.loc[valid_ret_idx]
 
         # ── BUG-9 修复：构建多 forward 收益率面板（所有因子共用，一次性构建）──
-        # 若调用方未传入 ic_return_panels，则从 engine 自动构建
+        # 若调用方未传入 ic_return_panels，则从 builder 自动构建（带缓存）
         if ic_return_panels is None:
             ic_return_panels = {}
             for _fwd in ic_forward_list:
-                _rp = self.engine.build_return_panel(forward=_fwd)
+                _rp = self._builder.build_return_panel(forward=_fwd)
                 _valid_idx = _rp.dropna(how="all").index
                 ic_return_panels[_fwd] = _rp.loc[_valid_idx]
 
@@ -572,7 +597,7 @@ class FactorPipeline:
 
                 if neutralize and self.engine.industry_map is not None:
                     self.engine.register("__mktcap__", lambda df: df["总市值（万元）"])
-                    mktcap_panel = self.engine.build_panel("__mktcap__")
+                    mktcap_panel = self._builder.build_panel("__mktcap__")
                     del self.engine._registry["__mktcap__"]
                     # BUG 11 FIX: reindex 到已截断的日频 factor_panel.index
                     mktcap_panel = mktcap_panel.reindex(factor_panel.index)
@@ -721,7 +746,7 @@ class FactorPipeline:
 
         for i, name in enumerate(factor_names, 1):
             print(f"\n[因子 {i}/{len(factor_names)}] 构建面板: {name} ...")
-            raw_panel = self.engine.build_panel(
+            raw_panel = self._builder.build_panel(
                 name, start=start, end=end, symbols=symbols
             )
             if raw_panel.empty:
@@ -734,7 +759,7 @@ class FactorPipeline:
                 panel = self.engine.apply_cross_section(panel, cs_winsorize)
             if neutralize and self.engine.industry_map is not None:
                 self.engine.register("__mktcap__", lambda df: df["总市值（万元）"])
-                mktcap_panel = self.engine.build_panel(
+                mktcap_panel = self._builder.build_panel(
                     "__mktcap__", start=start, end=end, symbols=symbols
                 )
                 del self.engine._registry["__mktcap__"]
@@ -754,7 +779,7 @@ class FactorPipeline:
 
         # ── Step 2：构建收益率面板（公共一份）──────────────────────────────
         print(f"\n构建收益率面板（forward={forward} 天）...")
-        return_panel = self.engine.build_return_panel(
+        return_panel = self._builder.build_return_panel(
             forward=forward, start=start, end=end, symbols=symbols
         )
 
@@ -813,7 +838,7 @@ class FactorPipeline:
         # IC 衰减（BUG-9 修复：使用同源多 forward 收益率面板，不从 close_panel 重算）
         ic_ret_panels_composite: Dict[int, pd.DataFrame] = {}
         for _fwd in ic_forward_list:
-            _rp = self.engine.build_return_panel(
+            _rp = self._builder.build_return_panel(
                 forward=_fwd, start=start, end=end, symbols=symbols
             )
             _valid_idx = _rp.dropna(how="all").index

@@ -4994,3 +4994,384 @@ class TestGlobalRegistry:
         for meta in self.reg.list_all():
             assert meta.warmup_days >= 1, f"{meta.name}.warmup_days={meta.warmup_days} < 1"
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Phase 2 缺口：DataStore / PanelBuilder
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestDataStore:
+    """
+    factor_framework.data.store.DataStore / CSVDataStore
+
+    覆盖：
+    - DataStore 是 ABC，不能直接实例化
+    - CSVDataStore.list_symbols() 返回 CSV 文件名列表
+    - CSVDataStore.get_raw_df() 返回 DataFrame 或 None
+    - CSVDataStore.get_price_panel() 返回 TimestampedPanel(semantic='price', price_basis='hfq')
+    - get_price_panel() 对空目录返回空面板
+    - 后复权价格：有复权因子列时 = 收盘价 × 复权因子
+    - 日期过滤参数（start/end）正确切片
+    """
+
+    def _make_stock_dir(self, tmp_path, n_stocks=3, n_days=20):
+        """在 tmp_path 下创建 n_stocks 个 CSV 文件（结构与实际数据一致）。"""
+        import os
+        stocks_dir = tmp_path / "stocks"
+        stocks_dir.mkdir()
+        dates = pd.date_range("20200101", periods=n_days, freq="B")
+        date_strs = dates.strftime("%Y%m%d").tolist()
+        for i in range(n_stocks):
+            code = f"S{i:06d}_SZ"
+            rows = []
+            for d in date_strs:
+                rows.append({
+                    "交易日": d,
+                    "股票代码": code,
+                    "收盘价": 10.0 + i + float(d[-2:]) * 0.01,
+                    "复权因子": 1.0 + i * 0.1,
+                    "总市值（万元）": 1000.0 * (i + 1),
+                    "成交量（手）": 10000,
+                    "成交额（千元）": 100000.0,
+                    "换手率（%）": 1.0,
+                    "流通市值（万元）": 800.0,
+                    "市净率": 2.0,
+                    "市盈率（TTM，亏损为空）": 15.0,
+                    "市销率（TTM）": 3.0,
+                })
+            pd.DataFrame(rows).to_csv(stocks_dir / f"{code}.csv", index=False)
+        return stocks_dir
+
+    def test_datastore_is_abstract(self):
+        """DataStore 是 ABC，不能直接实例化。"""
+        from factor_framework.data.store import DataStore
+        with pytest.raises(TypeError):
+            DataStore()
+
+    def test_csv_datastore_list_symbols(self, tmp_path):
+        """CSVDataStore.list_symbols() 应返回目录下的 CSV 文件名（去 .csv）。"""
+        from factor_framework.data.store import CSVDataStore
+        stocks_dir = self._make_stock_dir(tmp_path, n_stocks=3)
+        store = CSVDataStore(stocks_dir=str(stocks_dir))
+        syms = store.list_symbols()
+        assert len(syms) == 3
+        for s in syms:
+            assert not s.endswith(".csv")
+
+    def test_csv_datastore_list_symbols_sorted(self, tmp_path):
+        """list_symbols() 应返回已排序的列表。"""
+        from factor_framework.data.store import CSVDataStore
+        stocks_dir = self._make_stock_dir(tmp_path, n_stocks=5)
+        store = CSVDataStore(stocks_dir=str(stocks_dir))
+        syms = store.list_symbols()
+        assert syms == sorted(syms)
+
+    def test_csv_datastore_get_raw_df_valid(self, tmp_path):
+        """get_raw_df() 对存在的股票应返回 DataFrame。"""
+        from factor_framework.data.store import CSVDataStore
+        stocks_dir = self._make_stock_dir(tmp_path, n_stocks=1)
+        store  = CSVDataStore(stocks_dir=str(stocks_dir))
+        sym    = store.list_symbols()[0]
+        df = store.get_raw_df(sym)
+        assert df is not None
+        assert isinstance(df, pd.DataFrame)
+        assert "交易日" in df.columns
+        assert "收盘价" in df.columns
+        assert len(df) > 0
+
+    def test_csv_datastore_get_raw_df_missing(self, tmp_path):
+        """get_raw_df() 对不存在的股票应返回 None。"""
+        from factor_framework.data.store import CSVDataStore
+        stocks_dir = self._make_stock_dir(tmp_path, n_stocks=1)
+        store = CSVDataStore(stocks_dir=str(stocks_dir))
+        result = store.get_raw_df("NONEXISTENT_STOCK")
+        assert result is None
+
+    def test_csv_datastore_get_price_panel_returns_timestamped_panel(self, tmp_path):
+        """get_price_panel() 应返回 TimestampedPanel(semantic='price', price_basis='hfq')。"""
+        from factor_framework.data.store import CSVDataStore
+        from factor_framework.core.panel import TimestampedPanel
+        stocks_dir = self._make_stock_dir(tmp_path, n_stocks=3)
+        store = CSVDataStore(stocks_dir=str(stocks_dir))
+        panel = store.get_price_panel()
+        assert isinstance(panel, TimestampedPanel)
+        assert panel.semantic == "price"
+        assert panel.price_basis == "hfq"
+
+    def test_csv_datastore_get_price_panel_shape(self, tmp_path):
+        """get_price_panel() 面板列数应等于股票数。"""
+        from factor_framework.data.store import CSVDataStore
+        stocks_dir = self._make_stock_dir(tmp_path, n_stocks=4, n_days=15)
+        store = CSVDataStore(stocks_dir=str(stocks_dir))
+        panel = store.get_price_panel()
+        assert panel.shape[1] == 4
+
+    def test_csv_datastore_adj_price_applied(self, tmp_path):
+        """有复权因子时，价格面板中的值 = 收盘价 × 复权因子。"""
+        from factor_framework.data.store import CSVDataStore
+        stocks_dir = tmp_path / "stocks"
+        stocks_dir.mkdir()
+        # 单股：收盘价=10, 复权因子=2 → 后复权价格应为 20
+        rows = [{"交易日": "20200102", "收盘价": 10.0, "复权因子": 2.0}]
+        pd.DataFrame(rows).to_csv(stocks_dir / "A001_SZ.csv", index=False)
+        store = CSVDataStore(stocks_dir=str(stocks_dir))
+        panel = store.get_price_panel()
+        assert not panel.empty
+        val = panel.loc["20200102", "A001_SZ"]
+        assert abs(val - 20.0) < 1e-6
+
+    def test_csv_datastore_date_filter(self, tmp_path):
+        """get_price_panel(start=..., end=...) 应正确过滤日期。"""
+        from factor_framework.data.store import CSVDataStore
+        stocks_dir = self._make_stock_dir(tmp_path, n_stocks=2, n_days=30)
+        store = CSVDataStore(stocks_dir=str(stocks_dir))
+        panel_all   = store.get_price_panel()
+        panel_slice = store.get_price_panel(start="20200110", end="20200120")
+        assert len(panel_slice) < len(panel_all)
+        idx = panel_slice.index.tolist()
+        assert all("20200110" <= d <= "20200120" for d in idx)
+
+    def test_csv_datastore_empty_dir(self, tmp_path):
+        """空目录下 get_price_panel() 应返回空 TimestampedPanel 而非抛出异常。"""
+        from factor_framework.data.store import CSVDataStore
+        from factor_framework.core.panel import TimestampedPanel
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        store = CSVDataStore(stocks_dir=str(empty_dir))
+        panel = store.get_price_panel()
+        assert isinstance(panel, TimestampedPanel)
+        assert panel.empty
+
+    def test_csv_datastore_is_datastore_subclass(self):
+        """CSVDataStore 必须是 DataStore 的子类。"""
+        from factor_framework.data.store import DataStore, CSVDataStore
+        assert issubclass(CSVDataStore, DataStore)
+
+    def test_data_package_imports(self):
+        """factor_framework.data 包应能正常导入 DataStore 和 CSVDataStore。"""
+        from factor_framework.data import DataStore, CSVDataStore
+        assert DataStore is not None
+        assert CSVDataStore is not None
+
+
+class TestPanelBuilder:
+    """
+    factor_framework.engine.panel_builder.PanelBuilder
+
+    覆盖：
+    - 基础构造（无缓存模式）
+    - engine 属性延迟初始化
+    - register / register_builtins 代理
+    - build_panel 无缓存路径
+    - build_panel 有缓存路径（L1 命中，无需重算）
+    - build_return_panel 有缓存路径
+    - build_panel_batch 批量构建
+    - industry_map / all_symbols / apply_cross_section 代理属性
+    - engine 包导出
+    """
+
+    def _make_stocks_dir(self, tmp_path, n_stocks=3, n_days=60):
+        """创建最小 Stocks/ 目录（含 _ret 可计算列）。"""
+        stocks_dir = tmp_path / "Stocks"
+        stocks_dir.mkdir()
+        dates = pd.date_range("20200101", periods=n_days, freq="B")
+        date_strs = dates.strftime("%Y%m%d").tolist()
+        rng = np.random.default_rng(42)
+        for i in range(n_stocks):
+            code = f"S{i:06d}_SZ"
+            prices = np.cumprod(1 + rng.normal(0, 0.01, n_days)) * 10
+            rows = []
+            for j, d in enumerate(date_strs):
+                rows.append({
+                    "交易日": d,
+                    "股票代码": code,
+                    "收盘价": prices[j],
+                    "总市值（万元）": 1000.0,
+                    "成交量（手）": 10000,
+                    "成交额（千元）": 100000.0,
+                    "换手率（%）": 1.0,
+                    "流通市值（万元）": 800.0,
+                    "复权因子": 1.0,
+                    "市净率": 2.0,
+                    "市盈率（TTM，亏损为空）": 15.0,
+                    "市销率（TTM）": 3.0,
+                })
+            pd.DataFrame(rows).to_csv(stocks_dir / f"{code}.csv", index=False)
+        return stocks_dir
+
+    def test_panel_builder_no_cache_constructs(self, tmp_path):
+        """PanelBuilder 无缓存模式可正常构造。"""
+        from factor_framework.engine.panel_builder import PanelBuilder
+        stocks_dir = self._make_stocks_dir(tmp_path)
+        builder = PanelBuilder(stocks_dir=str(stocks_dir), cache=None, verbose=False)
+        assert builder is not None
+        assert builder.cache is None
+
+    def test_panel_builder_engine_lazy(self, tmp_path):
+        """engine 属性应在首次访问时才初始化（延迟加载）。"""
+        from factor_framework.engine.panel_builder import PanelBuilder
+        stocks_dir = self._make_stocks_dir(tmp_path)
+        builder = PanelBuilder(stocks_dir=str(stocks_dir), cache=None, verbose=False)
+        assert builder._engine is None  # 尚未访问，未初始化
+        _ = builder.engine               # 触发初始化
+        assert builder._engine is not None
+
+    def test_panel_builder_register_proxy(self, tmp_path):
+        """register() 应透传给底层 FactorEngine。"""
+        from factor_framework.engine.panel_builder import PanelBuilder
+        stocks_dir = self._make_stocks_dir(tmp_path)
+        builder = PanelBuilder(stocks_dir=str(stocks_dir), cache=None, verbose=False)
+        builder.register("test_factor", lambda df: df["收盘价"])
+        assert "test_factor" in builder.engine._registry
+
+    def test_panel_builder_all_symbols(self, tmp_path):
+        """all_symbols() 应返回 Stocks/ 目录下所有股票代码。"""
+        from factor_framework.engine.panel_builder import PanelBuilder
+        stocks_dir = self._make_stocks_dir(tmp_path, n_stocks=4)
+        builder = PanelBuilder(stocks_dir=str(stocks_dir), cache=None, verbose=False)
+        syms = builder.all_symbols()
+        assert len(syms) == 4
+
+    def test_panel_builder_build_panel_no_cache(self, tmp_path):
+        """build_panel() 无缓存模式应能正确返回因子面板。"""
+        from factor_framework.engine.panel_builder import PanelBuilder
+        stocks_dir = self._make_stocks_dir(tmp_path, n_stocks=3, n_days=60)
+        builder = PanelBuilder(stocks_dir=str(stocks_dir), cache=None, verbose=False)
+        builder.register("close_factor", lambda df: df["收盘价"])
+        panel = builder.build_panel("close_factor")
+        assert isinstance(panel, pd.DataFrame)
+        assert not panel.empty
+        assert panel.shape[1] == 3
+
+    def test_panel_builder_build_panel_with_cache_l1_hit(self, tmp_path):
+        """第二次调用 build_panel() 应命中 L1 缓存，返回相同面板。"""
+        from factor_framework.engine.panel_builder import PanelBuilder
+        from factor_framework.engine.cache import CacheLayer
+        stocks_dir = self._make_stocks_dir(tmp_path, n_stocks=3, n_days=60)
+        cache = CacheLayer(
+            cache_dir=str(tmp_path / "cache"),
+            stocks_dir=str(stocks_dir),
+            enabled_l2=False,   # 只测 L1
+            min_calc_secs=0.0,
+        )
+        builder = PanelBuilder(
+            stocks_dir=str(stocks_dir), cache=cache, verbose=False
+        )
+        builder.register("close_factor", lambda df: df["收盘价"])
+
+        panel1 = builder.build_panel("close_factor")
+        # L1 应有 1 条记录
+        assert cache.cache_info()["l1_entries"] == 1
+
+        panel2 = builder.build_panel("close_factor")
+        # 第二次应命中 L1，返回相同数据
+        pd.testing.assert_frame_equal(panel1, panel2)
+        # 仍只有 1 条 L1 记录（没有重复写入）
+        assert cache.cache_info()["l1_entries"] == 1
+
+    def test_panel_builder_build_return_panel_no_cache(self, tmp_path):
+        """build_return_panel() 无缓存应能返回收益率面板。"""
+        from factor_framework.engine.panel_builder import PanelBuilder
+        stocks_dir = self._make_stocks_dir(tmp_path, n_stocks=3, n_days=60)
+        builder = PanelBuilder(stocks_dir=str(stocks_dir), cache=None, verbose=False)
+        panel = builder.build_return_panel(forward=1)
+        assert isinstance(panel, pd.DataFrame)
+        assert not panel.empty
+        assert panel.shape[1] == 3
+
+    def test_panel_builder_build_return_panel_cache(self, tmp_path):
+        """build_return_panel() 有缓存时第二次应命中 L1。"""
+        from factor_framework.engine.panel_builder import PanelBuilder
+        from factor_framework.engine.cache import CacheLayer
+        stocks_dir = self._make_stocks_dir(tmp_path, n_stocks=3, n_days=60)
+        cache = CacheLayer(
+            cache_dir=str(tmp_path / "cache"),
+            stocks_dir=str(stocks_dir),
+            enabled_l2=False,
+            min_calc_secs=0.0,
+        )
+        builder = PanelBuilder(stocks_dir=str(stocks_dir), cache=cache, verbose=False)
+        p1 = builder.build_return_panel(forward=5)
+        assert cache.cache_info()["l1_entries"] == 1
+        p2 = builder.build_return_panel(forward=5)
+        pd.testing.assert_frame_equal(p1, p2)
+
+    def test_panel_builder_different_forwards_separate_cache_entries(self, tmp_path):
+        """不同 forward 的收益率面板应有独立的缓存键。"""
+        from factor_framework.engine.panel_builder import PanelBuilder
+        from factor_framework.engine.cache import CacheLayer
+        stocks_dir = self._make_stocks_dir(tmp_path, n_stocks=3, n_days=60)
+        cache = CacheLayer(
+            cache_dir=str(tmp_path / "cache"),
+            stocks_dir=str(stocks_dir),
+            enabled_l2=False,
+            min_calc_secs=0.0,
+        )
+        builder = PanelBuilder(stocks_dir=str(stocks_dir), cache=cache, verbose=False)
+        builder.build_return_panel(forward=1)
+        builder.build_return_panel(forward=5)
+        # 两个不同的缓存条目
+        assert cache.cache_info()["l1_entries"] == 2
+
+    def test_panel_builder_register_builtins(self, tmp_path):
+        """register_builtins() 应能注册内置因子。"""
+        from factor_framework.engine.panel_builder import PanelBuilder
+        stocks_dir = self._make_stocks_dir(tmp_path)
+        builder = PanelBuilder(stocks_dir=str(stocks_dir), cache=None, verbose=False)
+        builder.register_builtins(["vol_20d", "momentum_12_1"])
+        assert "vol_20d" in builder.engine._registry
+        assert "momentum_12_1" in builder.engine._registry
+
+    def test_engine_package_exports_panel_builder(self):
+        """factor_framework.engine 包应导出 PanelBuilder。"""
+        from factor_framework.engine import PanelBuilder
+        assert PanelBuilder is not None
+
+    def test_pipeline_uses_panel_builder(self, tmp_path):
+        """FactorPipeline 应持有 _builder 属性（PanelBuilder 实例）。"""
+        from factor_framework.engine.panel_builder import PanelBuilder
+        from factor_framework.pipeline import FactorPipeline
+        stocks_dir = self._make_stocks_dir(tmp_path)
+        pipe = FactorPipeline(
+            stocks_dir  = str(stocks_dir),
+            stock_basic = str(tmp_path / "nonexistent.csv"),
+            verbose     = False,
+        )
+        assert hasattr(pipe, "_builder")
+        assert isinstance(pipe._builder, PanelBuilder)
+
+    def test_pipeline_cache_dir_creates_cache_layer(self, tmp_path):
+        """指定 cache_dir 时，FactorPipeline 应创建 CacheLayer。"""
+        from factor_framework.engine.cache import CacheLayer
+        from factor_framework.pipeline import FactorPipeline
+        stocks_dir = self._make_stocks_dir(tmp_path)
+        pipe = FactorPipeline(
+            stocks_dir  = str(stocks_dir),
+            stock_basic = str(tmp_path / "nonexistent.csv"),
+            verbose     = False,
+            cache_dir   = str(tmp_path / "cache"),
+        )
+        assert pipe._builder.cache is not None
+        assert isinstance(pipe._builder.cache, CacheLayer)
+
+    def test_pipeline_no_cache_dir_no_cache_layer(self, tmp_path):
+        """不指定 cache_dir 时，FactorPipeline 的 _builder.cache 应为 None。"""
+        from factor_framework.pipeline import FactorPipeline
+        stocks_dir = self._make_stocks_dir(tmp_path)
+        pipe = FactorPipeline(
+            stocks_dir  = str(stocks_dir),
+            stock_basic = str(tmp_path / "nonexistent.csv"),
+            verbose     = False,
+        )
+        assert pipe._builder.cache is None
+
+    def test_pipeline_engine_backward_compat(self, tmp_path):
+        """pipe.engine 应仍可访问底层 FactorEngine（向后兼容）。"""
+        from factor_framework.factor_engine import FactorEngine
+        from factor_framework.pipeline import FactorPipeline
+        stocks_dir = self._make_stocks_dir(tmp_path)
+        pipe = FactorPipeline(
+            stocks_dir  = str(stocks_dir),
+            stock_basic = str(tmp_path / "nonexistent.csv"),
+            verbose     = False,
+        )
+        assert isinstance(pipe.engine, FactorEngine)

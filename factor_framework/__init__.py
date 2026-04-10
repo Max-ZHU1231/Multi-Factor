@@ -16,7 +16,8 @@ factor_framework
   optimizer.py      - 因子组合与权重优化（等权、ICIR 加权）
   pipeline.py       - 端到端 Pipeline：加载→清洗→计算→检验→输出
   core/             - Phase 2 数据结构基础层（TimestampedPanel, ReturnPanel）
-  engine/           - Phase 2 缓存层（CacheLayer L1+L2）
+  engine/           - Phase 2 缓存层（CacheLayer L1+L2）+ PanelBuilder（带缓存的面板构建器）
+  data/             - Phase 2 数据抽象层（DataStore ABC + CSVDataStore）
   factors/          - Phase 3 元数据层（FactorMeta, FactorRegistry, _CompatDict）
 
 快速开始
