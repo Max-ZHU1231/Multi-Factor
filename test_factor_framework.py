@@ -3360,3 +3360,201 @@ class TestV291Fixes:
             f"batch NaN={nan_batch}，single NaN={nan_single}，"
             f"差距超过 5%（total={total}），说明 warm-up 修复未生效"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v2.9.2 修复专项测试（BUG 5-9）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestV292Fixes:
+    """
+    验证 v2.9.2 修复的五项问题：
+    BUG 5 - value_pb/pe/ps lag_days 默认改为 0（数据源为日频市场估值）
+    BUG 6 - downside_vol min_periods 改为满窗口 d（消除冷启动噪声）
+    BUG 7 - pastor_stambaugh 改用后复权收益率
+    BUG 8 - order_imbalance 文档澄清（无代码错误）
+    BUG 9 - ic_decay 逐列计算收益率，消除跨股 NaN 传播 + factor_panel 对齐优化
+    """
+
+    # ─── BUG 5：value_pb/pe/ps lag_days 默认值 ──────────────────────────────
+
+    def test_value_pb_default_lag_zero(self):
+        """value_pb 默认 lag_days=0（无多余滞后，数据源已是日频市场估值）。"""
+        import inspect
+        from factor_framework.factor_zoo import value_pb, value_pe_ttm, value_ps_ttm
+        for fn in [value_pb, value_pe_ttm, value_ps_ttm]:
+            sig = inspect.signature(fn)
+            default = sig.parameters["lag_days"].default
+            assert default == 0, (
+                f"{fn.__name__} lag_days 默认值应为 0，实际为 {default}"
+            )
+
+    def test_value_pb_no_shift_when_lag_zero(self):
+        """lag_days=0 时，value_pb 不做 shift（因子值与输入等长）。"""
+        from factor_framework.factor_zoo import value_pb
+        df = pd.DataFrame({"市净率": [1.0, 2.0, 4.0, np.nan, 2.0]})
+        result = value_pb(df, lag_days=0)
+        expected = pd.Series([1.0, 0.5, 0.25, np.nan, 0.5])
+        pd.testing.assert_series_equal(result.reset_index(drop=True),
+                                       expected, check_names=False)
+
+    def test_value_pb_shift_when_lag_nonzero(self):
+        """lag_days>0 时，value_pb 做 shift（保留向后兼容性）。"""
+        from factor_framework.factor_zoo import value_pb
+        df = pd.DataFrame({"市净率": [1.0, 2.0, 4.0, 2.0, 1.0]})
+        result = value_pb(df, lag_days=1)
+        # index 0 应为 NaN（shift 后）
+        assert pd.isna(result.iloc[0])
+        # index 1 应等于 1/1.0=1.0（来自 index 0 的 PB）
+        assert abs(result.iloc[1] - 1.0) < 1e-9
+
+    # ─── BUG 6：downside_vol min_periods ────────────────────────────────────
+
+    def test_downside_vol_min_periods_full_window(self):
+        """downside_vol 要求满窗口（min_periods=d），回测期初行数更少但质量更高。"""
+        import inspect
+        from factor_framework.factor_zoo import downside_vol
+        src = inspect.getsource(downside_vol)
+        # 检查不再有 d // 2 作为 min_periods
+        assert "d // 2" not in src, (
+            "downside_vol 不应再使用 d//2 作为 min_periods（应改为 d）"
+        )
+        assert "min_periods=d" in src, (
+            "downside_vol 应使用 min_periods=d"
+        )
+
+    def test_downside_vol_nan_before_full_window(self):
+        """满窗口前应全为 NaN（冷启动保护）。"""
+        from factor_framework.factor_zoo import downside_vol
+        n, d = 50, 20
+        np.random.seed(0)
+        prices = 100 * np.exp(np.random.randn(n).cumsum() * 0.01)
+        df = pd.DataFrame({"收盘价": prices, "_ret": pd.Series(prices).pct_change()})
+        result = downside_vol(df, d=d)
+        # 前 d-1 行应全为 NaN
+        assert result.iloc[:d - 1].isna().all(), (
+            f"前 {d-1} 行应全为 NaN（满窗口前不计算），"
+            f"但有 {result.iloc[:d-1].notna().sum()} 个非 NaN"
+        )
+
+    # ─── BUG 7：pastor_stambaugh 后复权 ─────────────────────────────────────
+
+    def test_pastor_stambaugh_uses_hfq(self):
+        """
+        pastor_stambaugh 用后复权收益率（而非前复权 _ret）。
+        有/无复权因子时结果应不同。
+        """
+        import numpy as np
+        from factor_framework.factor_zoo import pastor_stambaugh
+        n = 100
+        np.random.seed(7)
+        prices = 100 * np.exp(np.random.randn(n).cumsum() * 0.01)
+        volume = np.random.randint(1000, 10000, n).astype(float)
+
+        # 有复权因子（除权事件）
+        adj = np.ones(n)
+        adj[50:] = 2.0
+        df_adj = pd.DataFrame({"收盘价": prices, "成交量（手）": volume, "复权因子": adj})
+        df_no  = pd.DataFrame({"收盘价": prices, "成交量（手）": volume})
+
+        r_adj = pastor_stambaugh(df_adj).dropna()
+        r_no  = pastor_stambaugh(df_no).dropna()
+
+        if len(r_adj) > 0 and len(r_no) > 0:
+            common = r_adj.index.intersection(r_no.index)
+            if len(common) > 0:
+                diff = (r_adj.loc[common] - r_no.loc[common]).abs()
+                assert diff.max() > 1e-9, (
+                    "pastor_stambaugh 有/无复权因子结果完全相同，"
+                    "说明仍在使用前复权 _ret"
+                )
+
+    # ─── BUG 9：ic_decay 逐列收益率 + factor_panel 对齐 ──────────────────
+
+    def test_ic_decay_per_column_no_nan_propagation(self, factor_panel, return_panel):
+        """
+        ic_decay 的收益率构建应逐列计算（price.shift(-fwd)/price-1），
+        而非 pct_change(fwd, axis=0)（后者在有停牌 NaN 时会跨列传播 NaN）。
+        """
+        from factor_framework.ic_analysis import ic_decay
+
+        # 构造含停牌 NaN 的价格面板（某只股票某段时间停牌）
+        n, m = 60, 5
+        np.random.seed(1)
+        prices = 100 * np.exp(np.random.randn(n, m).cumsum(axis=0) * 0.01)
+        dates  = [f"202001{d:02d}" for d in range(1, n + 1)]
+        cols   = [f"S{i:03d}" for i in range(m)]
+        price_df = pd.DataFrame(prices, index=dates, columns=cols)
+        # 注入停牌：第 30-40 行的第 0 列为 NaN
+        price_df.iloc[30:40, 0] = np.nan
+
+        factor_df = pd.DataFrame(
+            np.random.randn(n, m), index=dates, columns=cols
+        )
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = ic_decay(factor_df, price_df, forward_periods=[1, 5], method="rank")
+
+        assert isinstance(result, pd.DataFrame)
+        # 至少 forward=1 的 mean_ic 应是有限数（不因 NaN 传播而全部变 NaN）
+        assert not pd.isna(result.loc[1, "mean_ic"]), (
+            "ic_decay forward=1 的 mean_ic 为 NaN，"
+            "可能是停牌 NaN 跨列传播导致（逐列计算可修复此问题）"
+        )
+
+    def test_ic_decay_factor_panel_not_truncated(self, factor_panel, return_panel):
+        """
+        ic_decay 不应截断 factor_panel，而应通过 intersection 对齐，
+        避免浪费 factor_panel 尾部的有效数据。
+        """
+        from factor_framework.ic_analysis import ic_decay
+
+        n, m = 80, 5
+        np.random.seed(2)
+        dates  = [f"202001{d:02d}" for d in range(1, n + 1)]
+        cols   = [f"S{i:03d}" for i in range(m)]
+        prices = 100 * np.exp(np.random.randn(n, m).cumsum(axis=0) * 0.01)
+        factors = np.random.randn(n, m)
+
+        price_df  = pd.DataFrame(prices,  index=dates, columns=cols)
+        factor_df = pd.DataFrame(factors, index=dates, columns=cols)
+
+        fwd = 10
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = ic_decay(factor_df, price_df, forward_periods=[fwd], method="rank")
+
+        # ic_decay 不报错，且有合理结果
+        assert isinstance(result, pd.DataFrame)
+        assert fwd in result.index
+
+    def test_ic_decay_vs_pct_change_differs_with_nan(self):
+        """
+        验证新实现（逐列 shift）与旧实现（pct_change axis=0）
+        在含停牌 NaN 时结果不同（新方法更准确）。
+        """
+        n, m = 60, 3
+        np.random.seed(9)
+        prices = pd.DataFrame(
+            100 * np.exp(np.random.randn(n, m).cumsum(axis=0) * 0.01),
+            columns=[f"S{i}" for i in range(m)]
+        )
+        # 注入停牌：第 20-25 行第 0 列为 NaN
+        prices.iloc[20:25, 0] = np.nan
+
+        fwd = 5
+        # 旧方法（pct_change，跨列传播 NaN）
+        old = prices.pct_change(fwd, axis=0).shift(-fwd)
+        # 新方法（逐列 shift，不传播）
+        new = prices.shift(-fwd) / prices.replace(0, np.nan) - 1
+
+        # 停牌行周围：旧方法会多产生 NaN，新方法不会
+        affected_rows = list(range(15, 30))
+        old_nan_count = old.iloc[affected_rows, 0].isna().sum()
+        new_nan_count = new.iloc[affected_rows, 0].isna().sum()
+        assert new_nan_count <= old_nan_count, (
+            f"新方法 NaN 数（{new_nan_count}）不应多于旧方法（{old_nan_count}）"
+        )

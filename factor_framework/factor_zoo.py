@@ -179,27 +179,34 @@ def vol_skew(df: pd.DataFrame) -> pd.Series:
 def downside_vol(df: pd.DataFrame, d: int = 60) -> pd.Series:
     """
     下行波动率：仅用负收益计算标准差（d 天窗口）。
+
+    v2.9.1 修复：min_periods 从 d//2 改为 d，要求满窗口数据。
+    半窗口计算会在回测期初引入大量噪声（用 30 天数据估计 60 天波动率），
+    使因子值在冷启动期严重失真。满窗口后行数会减少，但质量更可靠。
     """
     r = _ret(df)
     def _down_std(w: np.ndarray) -> float:
         neg = w[w < 0]
         return float(np.std(neg, ddof=1)) if len(neg) >= 2 else np.nan
-    return r.rolling(d, min_periods=d // 2).apply(_down_std, raw=True)
+    return r.rolling(d, min_periods=d).apply(_down_std, raw=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 估值因子
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def value_pb(df: pd.DataFrame, lag_days: int = 20) -> pd.Series:
+def value_pb(df: pd.DataFrame, lag_days: int = 0) -> pd.Series:
     """
     市净率倒数（BP = 1/PB，值越大→估值越低→正向）。
 
-    Parameters
-    ----------
-    lag_days : 财务数据滞后天数（默认 20 个交易日 ≈ 1 个月）。
-               用于规避尚未公告的财报被提前使用（前瞻偏差）。
-               若数据源已按公告日严格对齐，可设为 0。
+    数据说明（v2.9.1）
+    ------------------
+    市净率列来自 ak.stock_zh_valuation_baidu，返回日频市场实时估值：
+    每天根据当日股价 ÷ 最新财报净资产重新计算，属于市场数据每日更新，
+    不存在财报公告日前瞻问题，因此 lag_days 默认改为 0。
+
+    若使用其他数据源（按报告期而非公告日存储财务数据），
+    可手动设置 lag_days > 0（如 lag_days=60）以规避前瞻偏差。
     """
     pb = df[_PB].replace(0, np.nan)
     if lag_days > 0:
@@ -207,14 +214,14 @@ def value_pb(df: pd.DataFrame, lag_days: int = 20) -> pd.Series:
     return 1.0 / pb
 
 
-def value_pe_ttm(df: pd.DataFrame, lag_days: int = 20) -> pd.Series:
+def value_pe_ttm(df: pd.DataFrame, lag_days: int = 0) -> pd.Series:
     """
     市盈率（TTM）倒数（EP，值越大→估值越低→正向）。
 
-    Parameters
-    ----------
-    lag_days : 财务数据滞后天数（默认 20 个交易日）。
-               防止使用尚未披露的盈利数据（前瞻偏差）。
+    数据说明（v2.9.1）
+    ------------------
+    市盈率（TTM）列为日频市场实时估值数据（同 value_pb），
+    每天根据当日股价和滚动 12 个月盈利重新计算，lag_days 默认改为 0。
     """
     pe = df[_PE].replace(0, np.nan)
     if lag_days > 0:
@@ -222,14 +229,13 @@ def value_pe_ttm(df: pd.DataFrame, lag_days: int = 20) -> pd.Series:
     return 1.0 / pe
 
 
-def value_ps_ttm(df: pd.DataFrame, lag_days: int = 20) -> pd.Series:
+def value_ps_ttm(df: pd.DataFrame, lag_days: int = 0) -> pd.Series:
     """
     市销率（TTM）倒数（SP，值越大→越便宜）。
 
-    Parameters
-    ----------
-    lag_days : 财务数据滞后天数（默认 20 个交易日）。
-               防止使用尚未披露的营收数据（前瞻偏差）。
+    数据说明（v2.9.1）
+    ------------------
+    市销率（TTM）列为日频市场实时估值数据（同 value_pb），lag_days 默认改为 0。
     """
     ps = df[_PS].replace(0, np.nan)
     if lag_days > 0:
@@ -328,20 +334,35 @@ def pastor_stambaugh(df: pd.DataFrame, d: int = 21) -> pd.Series:
         收益率对 sign(ret_{t-1}) * volume_{t-1} * ret_{t-1} 做滚动回归的斜率。
     斜率越负（绝对值越大）→ 价格冲击越大 → 流动性越差（取负后正向）。
     使用 ts_corr 近似实现：corr(ret_t, signed_vol_{t-1})。
+
+    v2.9.1 修复：改用后复权价格（_hfq_close）衍生的日收益率，
+    消除前复权数据回溯修改历史价格带来的隐式前瞻偏差（同 BUG 4 修复）。
+    shift(1) 使用的是 t-1 期数据，执行方向正确，无未来函数。
     """
-    ret = _ret(df)
+    log_p  = np.log(_hfq_close(df))
+    ret    = (log_p - log_p.shift(1))          # 对数日收益率（后复权）
     signed_vol = np.sign(ret.shift(1)) * df[_V].shift(1) * ret.shift(1)
-    # 相关系数负值越大说明价格冲击越明显；取负使其成为正向流动性代理
-    corr = ts_corr(ret, signed_vol, d)
+    corr   = ts_corr(ret, signed_vol, d)
     return -corr
 
 
 def order_imbalance(df: pd.DataFrame, d: int = 21) -> pd.Series:
     """
-    订单不平衡持续性：委比（买盘 / (买盘 + 卖盘)）的滚动均值。
+    订单不平衡持续性：d 日收益方向均值（买压代理）。
+
+    实现说明
+    --------
     使用价格变动方向近似委比：ret > 0 视为买压，ret < 0 视为卖压。
         order_imbalance_proxy_t = (ret_t > 0) * 1 - (ret_t < 0) * 1  ∈ {-1, 0, 1}
     正值 → 买压主导 → 正向动量信号。
+
+    无未来函数：ret_t 是 t 日收盘价相对 t-1 日的变动，收盘后才能知道，
+    T+1 滞后由 pipeline 的 return_panel 统一处理，此处无需额外 shift。
+
+    局限性说明（v2.9.1）
+    --------------------
+    用价格变动方向代理委比是极粗糙的近似，实际意义有限。
+    若有实际委比/成交量分类（如 Lee-Ready 算法结果），应替换此因子。
     """
     ret = _ret(df)
     buy_pressure = (ret > 0).astype(float) - (ret < 0).astype(float)

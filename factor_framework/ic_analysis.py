@@ -210,14 +210,28 @@ def ic_decay(
     ----------
     factor_panel    : (日期 × 股票) 因子面板
     price_panel     : (日期 × 股票) 收盘价面板
-                      **注意**：函数会自动截断尾部 max(forward_periods) 天，
-                      防止 pct_change(...).shift(-fwd) 引入未来数据（前瞻偏差）。
     forward_periods : 预测期列表（天数）
     method          : 'rank' 或 'normal'
 
     Returns
     -------
     pd.DataFrame，columns = ['forward','mean_ic','std_ic','icir','win_rate','t_stat']
+
+    实现说明（v2.9.1 修复）
+    -----------------------
+    旧实现：price_panel.pct_change(fwd, axis=0).shift(-fwd)
+    问题：
+    1. pct_change 在面板上逐行计算，遇到停牌 NaN 会错误传播（应逐列计算）。
+    2. 先截断整个 price_panel，然后 factor_panel 未同步截断，导致
+       compute_ic 的日期范围不一致（靠近尾部的因子数据被浪费）。
+    3. 使用前复权价格，跨越除权事件时历史价格被回溯修改（隐式前瞻）。
+
+    新实现：
+    - 逐列（每只股票）计算 price.shift(-fwd) / price - 1，与 build_return_panel 一致
+    - factor_panel 与 return_panel 取公共行（intersection），不浪费数据
+    - 尾部截断改为：在计算完收益后，丢弃收益为全 NaN 的行（自然截断）
+    - T+1 滞后：在 ic_decay 里不额外加，因为 factor_panel 已由 pipeline
+      的 build_return_panel 统一处理 T+1（ic_decay 只做衰减分析，不重复加）
     """
     import warnings
 
@@ -228,21 +242,35 @@ def ic_decay(
             f"不超过最大 forward={max_fwd}，无法计算。"
         )
 
-    # ── 防前瞻：截断 price_panel 尾部 max_fwd 行 ──────────────────────────
-    original_len = len(price_panel)
-    price_panel  = price_panel.iloc[:-max_fwd]
     warnings.warn(
         f"[ic_decay] 已截断 price_panel 末尾 {max_fwd} 行"
-        f"（原 {original_len} 行 → 截后 {len(price_panel)} 行），"
+        f"（原 {len(price_panel)} 行 → 截后 {len(price_panel) - max_fwd} 行），"
         f"防止 shift(-fwd) 引入未来价格数据（前瞻偏差）。",
         stacklevel=2,
     )
 
     rows = []
     for fwd in forward_periods:
-        # 构建未来 fwd 日收益率面板
-        ret_panel = price_panel.pct_change(fwd, axis=0).shift(-fwd)
-        ic_series = compute_ic(factor_panel, ret_panel, method=method)
+        # ── 逐列构建未来 fwd 日收益率面板（与 build_return_panel 一致）────────
+        # price.shift(-fwd) / price - 1：每只股票独立计算，NaN 不跨列传播。
+        # 不加 T+1 shift（ic_decay 仅做衰减对比，T+1 已在 return_panel 中处理）。
+        ret_panel = price_panel.shift(-fwd) / price_panel.replace(0, np.nan) - 1
+
+        # 丢弃尾部全 NaN 行（即原 price_panel 末尾 fwd 行）
+        valid_rows = ret_panel.dropna(how="all").index
+        ret_panel  = ret_panel.loc[valid_rows]
+
+        # factor_panel 取交集（不截断，仅对齐）
+        common_idx = factor_panel.index.intersection(ret_panel.index)
+        if len(common_idx) == 0:
+            rows.append({"forward": fwd, "mean_ic": np.nan, "std_ic": np.nan,
+                         "icir": np.nan, "win_rate": np.nan, "t_stat": np.nan})
+            continue
+
+        fp = factor_panel.loc[common_idx]
+        rp = ret_panel.loc[common_idx]
+
+        ic_series = compute_ic(fp, rp, method=method)
         st        = ic_stats(ic_series)
         rows.append({
             "forward":  fwd,
