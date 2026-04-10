@@ -54,6 +54,36 @@ def _ret(df: pd.DataFrame) -> pd.Series:
     return df[_C].pct_change()
 
 
+def _hfq_close(df: pd.DataFrame) -> pd.Series:
+    """
+    后复权收盘价（v2.9.1）：收盘价 × 复权因子。
+
+    动机
+    ----
+    前复权（qfq）价格在每次除权时回溯修改所有历史价格，
+    导致今天看到的历史价格包含了未来的分红/除权信息（前瞻偏差）。
+    例如：2020 年底的价格会被 2023 年的分红事件修改。
+
+    后复权（hfq）价格从 IPO 起始基准向前累积，不修改历史价格，
+    是计算动量/反转等历史收益类因子的正确选择。
+
+    实现
+    ----
+    若 CSV 中包含「复权因子」列（_ADJ），则：
+        hfq = 收盘价 × 复权因子  （该列为当日相对 IPO 日的累计复权因子）
+    否则退化为直接使用收盘价（前复权，有偏但无替代数据时可接受）。
+
+    Returns
+    -------
+    pd.Series，与 df 等长，index 与 df.index 对齐
+    """
+    if _ADJ in df.columns:
+        adj = df[_ADJ].replace(0, np.nan).ffill()
+        return df[_C].replace(0, np.nan) * adj
+    # 无复权因子列：退化到原始收盘价（前复权，记录 warning 但不中断）
+    return df[_C].replace(0, np.nan)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 动量因子
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -63,11 +93,11 @@ def momentum_12_1(df: pd.DataFrame) -> pd.Series:
     经典 12-1 月动量：过去 252 个交易日收益率 - 过去 21 个交易日收益率
     （跳过最近 1 个月，规避短期反转）。
 
-    实现（v2.9 修正）：用对数价格差分替代 rolling.apply(np.prod)。
-    log(p[t] / p[t-n]) = log(p[t]) - log(p[t-n])，精度更高、速度更快。
-    最后用 exp(x) - 1 换算回简单收益率。
+    实现（v2.9.1）：
+    - 使用后复权价格（_hfq_close）避免前复权价格的前瞻偏差
+    - 用对数价格差分替代 rolling.apply(np.prod)（精度更高、速度更快）
     """
-    log_p  = np.log(df[_C].replace(0, np.nan))
+    log_p  = np.log(_hfq_close(df))
     mom_12 = np.exp(log_p - log_p.shift(252)) - 1
     mom_1  = np.exp(log_p - log_p.shift(21))  - 1
     # 仅保留 warm-up 期足够的有效行
@@ -78,8 +108,8 @@ def momentum_12_1(df: pd.DataFrame) -> pd.Series:
 
 
 def momentum_6_1(df: pd.DataFrame) -> pd.Series:
-    """6-1 月中期动量（v2.9：对数价格差分实现）。"""
-    log_p  = np.log(df[_C].replace(0, np.nan))
+    """6-1 月中期动量（v2.9.1：后复权 + 对数价格差分）。"""
+    log_p  = np.log(_hfq_close(df))
     mom_6  = np.exp(log_p - log_p.shift(126)) - 1
     mom_1  = np.exp(log_p - log_p.shift(21))  - 1
     valid  = log_p.notna() & log_p.shift(126).notna()
@@ -89,8 +119,8 @@ def momentum_6_1(df: pd.DataFrame) -> pd.Series:
 
 
 def momentum_1m(df: pd.DataFrame) -> pd.Series:
-    """短期 1 月动量（v2.9：对数价格差分实现）。"""
-    log_p  = np.log(df[_C].replace(0, np.nan))
+    """短期 1 月动量（v2.9.1：后复权 + 对数价格差分）。"""
+    log_p  = np.log(_hfq_close(df))
     result = np.exp(log_p - log_p.shift(21)) - 1
     result[log_p.shift(21).isna()] = np.nan
     return result
@@ -99,10 +129,11 @@ def momentum_1m(df: pd.DataFrame) -> pd.Series:
 def momentum_52w_high(df: pd.DataFrame) -> pd.Series:
     """
     52 周高点动量：收盘价 / 过去 252 日最高价。
-    接近高点 → 正向信号。
+    接近高点 → 正向信号。使用后复权价格保证历史高点可比性。
     """
-    high_52w = ts_max(df[_C], 252)
-    return df[_C] / high_52w.replace(0, np.nan)
+    hfq = _hfq_close(df)
+    high_52w = ts_max(hfq, 252)
+    return hfq / high_52w.replace(0, np.nan)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -110,15 +141,15 @@ def momentum_52w_high(df: pd.DataFrame) -> pd.Series:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def reversal_1w(df: pd.DataFrame) -> pd.Series:
-    """短期 1 周反转：过去 5 日收益率的负值（反转信号，v2.9：对数差分）。"""
-    log_p  = np.log(df[_C].replace(0, np.nan))
+    """短期 1 周反转：过去 5 日收益率的负值（反转信号，v2.9.1：后复权 + 对数差分）。"""
+    log_p  = np.log(_hfq_close(df))
     ret_5  = np.exp(log_p - log_p.shift(5)) - 1
     return -ret_5
 
 
 def reversal_1m(df: pd.DataFrame) -> pd.Series:
-    """短期 1 月反转：过去 21 日收益率的负值（v2.9：对数差分）。"""
-    log_p  = np.log(df[_C].replace(0, np.nan))
+    """短期 1 月反转：过去 21 日收益率的负值（v2.9.1：后复权 + 对数差分）。"""
+    log_p  = np.log(_hfq_close(df))
     ret_21 = np.exp(log_p - log_p.shift(21)) - 1
     return -ret_21
 

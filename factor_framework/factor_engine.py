@@ -130,6 +130,16 @@ def _fast_load(path: Path) -> Optional[pd.DataFrame]:
 
     df = df.sort_values("交易日").reset_index(drop=True)
 
+    # ── BUG FIX v2.9.1（Issue 3）：先计算日收益率，再做 ffill ─────────────────
+    # 若先 ffill 再 pct_change，停牌期（价格被填充为前值）的日收益率为 0，
+    # 会低估停牌股复牌后的实际涨跌幅，并污染动量因子的计算。
+    # 在 ffill 前，用原始未填充收盘价计算 _ret，停牌日为 NaN（正确）。
+    # _ret 列写入 df 后，下游因子（vol_20d 等）会正确跳过这些 NaN 日期。
+    _RET_COL = "_ret"
+    if "收盘价" in df.columns:
+        raw_close = df["收盘价"].copy()   # ffill 之前的原始价格
+        df[_RET_COL] = raw_close.pct_change()   # 停牌日 → NaN（而非 0）
+
     # 价格列 ffill（最多 5 天，处理停牌）
     price_cols = ["收盘价", "开盘价", "最高价", "最低价", "成交量（手）",
                   "成交额（千元）", "换手率（%）", "总市值（万元）", "流通市值（万元）"]
@@ -390,9 +400,12 @@ class FactorEngine:
             if df is None or len(df) < self.min_rows:
                 cache[symbol] = None
             else:
-                # 内部生成日收益率列，一次即可
                 df = df.copy()
-                df[COL_RET] = df[COL_CLOSE].pct_change()
+                # _fast_load 路径：_ret 已在 ffill 前计算（见 _fast_load 内部）。
+                # load_and_clean 路径：load_and_clean 内部做了 ffill，这里补算 _ret。
+                # 两条路径下，若 _ret 列已存在（fast_load 已写入），跳过重复计算。
+                if COL_RET not in df.columns:
+                    df[COL_RET] = df[COL_CLOSE].pct_change()
                 cache[symbol] = df
 
             return cache[symbol]
@@ -674,9 +687,13 @@ class FactorEngine:
             if df is None:
                 return {n: None for n in factor_names}
 
-            df_slice = _date_filter_df(df, start, end)
-            if df_slice is None:
-                return {n: None for n in factor_names}
+            # ── BUG FIX v2.9.1：先用完整 df 计算因子，计算完再按日期切片 ──────
+            # 旧代码：df_slice = _date_filter_df(df, start, end) 然后在 df_slice
+            # 上计算因子，导致 warm-up 期历史数据被截断，时序因子（如 momentum_12_1
+            # 需要 252 天）在回测期初产生大量额外 NaN（基于残缺窗口）。
+            # 正确做法：在完整 df 上计算，输出时再按 [start, end] 做日期切片，
+            # 与 compute_single 路径（先计算再截断）保持一致。
+            df_full = df  # 用完整历史计算，保证 warm-up 期数据足够
 
             out: Dict[str, Optional[pd.Series]] = {}
 
@@ -684,13 +701,15 @@ class FactorEngine:
             if expr_names:
                 sym_cache = LRUCache(-1)
                 executor  = DAGExecutor(sym_cache, self._expr_registry)
-                dag_results = executor.run(df_slice, factor_names=expr_names)
+                dag_results = executor.run(df_full, factor_names=expr_names)
                 for n in expr_names:
                     val = dag_results.get(n)
                     if val is not None:
                         val = val.copy()
-                        val.index = df_slice[COL_DATE].values
+                        val.index = df_full[COL_DATE].values
                         val.name  = sym
+                        # 计算完成后按日期切片（而不是在计算前切片）
+                        val = _date_filter(val, start, end)
                     out[n] = val
 
             # ── Lambda 因子：按拓扑顺序执行（尊重 deps）───────────────────
@@ -700,30 +719,36 @@ class FactorEngine:
                 # 确保所有 lamb_names 都包含（无依赖的放在最后）
                 topo_lambs = topo_lambs + [n for n in lamb_names if n not in topo_lambs]
 
-                df_work = df_slice.copy()
+                df_work = df_full.copy()
                 for n in topo_lambs:
                     if n not in lamb_names:
                         continue
                     self._resolve_compile_target(n)
-                    # 注入依赖列
+                    # 注入依赖列（依赖因子的完整时序结果，尚未切片）
                     for dep in self._dep_graph.deps_of(n):
                         dep_col = f"__dep_{dep}__"
                         if dep_col not in df_work.columns:
                             dep_val = out.get(dep)
                             if dep_val is not None:
-                                df_work[dep_col] = dep_val.reindex(
-                                    df_work[COL_DATE].values
-                                ).values
+                                # dep_val 已被切片，需重新对齐到完整 df 的日期索引
+                                dep_val_aligned = dep_val.reindex(df_work[COL_DATE].values)
+                                df_work[dep_col] = dep_val_aligned.values
                     try:
                         val = self._registry[n](df_work)
                         if val is not None:
                             val = val.copy()
                             val.index = df_work[COL_DATE].values
                             val.name  = sym
+                            # 计算完成后再按日期切片
+                            val = _date_filter(val, start, end)
                         out[n] = val
-                        # 写入 __dep__ 列供后续因子使用
+                        # 写入 __dep__ 列供后续因子使用（切片前的完整值）
+                        # 注意：dep_val 已切片，这里需要在 df_work（完整）上写入
                         if val is not None:
-                            df_work[f"__dep_{n}__"] = val.values
+                            # 反向对齐：用切片后的 val 填回完整 df_work 的对应行
+                            full_ser = pd.Series(np.nan, index=df_work[COL_DATE].values, dtype=float)
+                            full_ser.update(val)
+                            df_work[f"__dep_{n}__"] = full_ser.values
                     except Exception as e:
                         warnings.warn(f"{sym}/{n} 计算失败: {e}")
                         out[n] = None

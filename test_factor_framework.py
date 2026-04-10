@@ -3163,3 +3163,200 @@ class TestV29Fixes:
             assert len(apply_calls) == 0, (
                 f"{fn.__name__} 不应再有 .apply() 调用，发现 {len(apply_calls)} 处"
             )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v2.9.1 修复专项测试
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestV291Fixes:
+    """
+    验证 v2.9.1 修复的三项问题：
+    1. build_panel_batch 先计算因子再切片（修复 warm-up 截断 BUG）
+    2. _fast_load 中 _ret 在 ffill 前计算（停牌日收益率正确为 NaN 而非 0）
+    3. 动量/反转因子使用后复权价格（_hfq_close，消除前复权前瞻偏差）
+    """
+
+    STOCKS_DIR  = ROOT / "Stocks"
+    STOCK_BASIC = ROOT / "股票列表-stock_basic.csv"
+
+    @pytest.fixture(scope="class")
+    def engine(self):
+        if not self.STOCKS_DIR.exists():
+            pytest.skip("Stocks/ 目录不存在，跳过集成测试")
+        return FactorEngine(
+            stocks_dir  = self.STOCKS_DIR,
+            stock_basic = self.STOCK_BASIC,
+            min_rows    = 30,
+            verbose     = False,
+        )
+
+    # ─── 1. _hfq_close 后复权价格 ───────────────────────────────────────────
+
+    def test_hfq_close_with_adj_factor(self):
+        """有复权因子列时，_hfq_close = 收盘价 × 复权因子。"""
+        from factor_framework.factor_zoo import _hfq_close
+        df = pd.DataFrame({
+            "收盘价":  [10.0, 10.5, 11.0],
+            "复权因子": [1.0,  2.0,  2.0],
+        })
+        result = _hfq_close(df)
+        expected = pd.Series([10.0, 21.0, 22.0])
+        pd.testing.assert_series_equal(result.reset_index(drop=True),
+                                       expected, check_names=False)
+
+    def test_hfq_close_without_adj_factor(self):
+        """无复权因子列时，_hfq_close 退化到原始收盘价。"""
+        from factor_framework.factor_zoo import _hfq_close
+        df = pd.DataFrame({"收盘价": [10.0, 11.0, 12.0]})
+        result = _hfq_close(df)
+        expected = pd.Series([10.0, 11.0, 12.0])
+        pd.testing.assert_series_equal(result.reset_index(drop=True),
+                                       expected, check_names=False)
+
+    def test_hfq_close_zero_price_nan(self):
+        """0 价格应被转为 NaN（避免除零）。"""
+        from factor_framework.factor_zoo import _hfq_close
+        df = pd.DataFrame({
+            "收盘价":  [10.0, 0.0, 11.0],
+            "复权因子": [1.0,  1.0, 1.0],
+        })
+        result = _hfq_close(df)
+        assert pd.isna(result.iloc[1]), "0 价格应转为 NaN"
+
+    def test_momentum_uses_hfq_close(self):
+        """
+        验证 momentum_12_1 在有复权因子时使用了后复权价格（结果与无复权时不同）。
+        """
+        import numpy as np
+        from factor_framework.factor_zoo import momentum_12_1
+        n = 350
+        np.random.seed(42)
+        prices = 100.0 * np.exp(np.random.randn(n).cumsum() * 0.01)
+        # 有复权因子（模拟一次除权事件，adj 在第 200 天翻倍）
+        adj = np.ones(n)
+        adj[200:] = 2.0
+
+        df_with_adj = pd.DataFrame({"收盘价": prices, "复权因子": adj})
+        df_no_adj   = pd.DataFrame({"收盘价": prices})
+
+        r_with = momentum_12_1(df_with_adj).dropna()
+        r_no   = momentum_12_1(df_no_adj).dropna()
+
+        if len(r_with) > 0 and len(r_no) > 0:
+            common = r_with.index.intersection(r_no.index)
+            if len(common) > 0:
+                diff = (r_with.loc[common] - r_no.loc[common]).abs()
+                assert diff.max() > 1e-6, (
+                    "有/无复权因子时 momentum_12_1 结果完全相同，"
+                    "说明 _hfq_close 未生效"
+                )
+
+    # ─── 2. _ret 在 ffill 前计算（停牌日 NaN 而非 0）──────────────────────
+
+    def test_ret_nan_on_suspension_days(self):
+        """
+        停牌日（价格为 NaN，ffill 后价格不变）的日收益率应为 NaN，
+        而非 0（若在 ffill 后计算 pct_change 会产生错误的 0 收益率）。
+        """
+        import io, tempfile, os
+        from factor_framework.factor_engine import _fast_load
+        from pathlib import Path
+
+        # 构造含停牌日的 CSV（停牌日价格为空）
+        csv_content = (
+            "交易日,股票代码,收盘价,开盘价,最高价,最低价,"
+            "成交量（手）,成交额（千元）,换手率（%）,"
+            "总市值（万元）,流通市值（万元）,"
+            "市净率,市盈率（TTM，亏损为空）,市销率（TTM）,复权因子\n"
+        )
+        rows = [
+            ("20210101", "A", "10.0"),
+            ("20210102", "A", "10.5"),
+            ("20210103", "A", ""),       # 停牌日：价格缺失
+            ("20210104", "A", ""),       # 停牌日：价格缺失
+            ("20210105", "A", "11.0"),
+        ]
+        for d, c, p in rows:
+            csv_content += f"{d},{c},{p},{p},{p},{p},1000,10000,1.0,1e6,8e5,2.0,20.0,3.0,1.0\n"
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".csv", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(csv_content)
+            tmp_path = Path(f.name)
+
+        try:
+            df = _fast_load(tmp_path)
+            assert df is not None
+            ret = df["_ret"]
+            # 停牌日（index 2, 3，对应 20210103, 20210104）的 _ret 应为 NaN
+            # （不是 0，因为 _ret 在 ffill 前计算）
+            suspension_mask = df["交易日"].isin(["20210103", "20210104"])
+            suspension_rets = ret[suspension_mask]
+            assert suspension_rets.isna().all(), (
+                f"停牌日 _ret 应为 NaN，实际值：{suspension_rets.tolist()}"
+            )
+            # 正常交易日的 _ret 应非 NaN（第 2 行：10.5/10.0-1=0.05）
+            day2_ret = ret[df["交易日"] == "20210102"].iloc[0]
+            assert abs(day2_ret - 0.05) < 1e-6, f"正常日 _ret 应约为 0.05，实际 {day2_ret}"
+        finally:
+            os.unlink(tmp_path)
+
+    # ─── 3. build_panel_batch warm-up 修复 ──────────────────────────────────
+
+    def test_batch_vs_single_panel_consistency(self, engine):
+        """
+        build_panel_batch 与 build_panel（compute_single 路径）
+        对同一因子、同一 symbol 列表应产生相近的结果。
+        修复前：batch 路径先截日期再计算，导致回测期初 NaN 比 single 路径更多。
+        """
+        symbols = engine.all_symbols()[:5]
+        if not symbols:
+            pytest.skip("无股票文件")
+
+        factor = "vol_20d_v291_test"
+        # 注册一个简单的时序因子（需要 20 天 warm-up）
+        from factor_framework.factor_engine import COL_RET
+        engine.register(factor, lambda df: -df[COL_RET].rolling(20, min_periods=15).std())
+
+        start, end = "20210601", "20211231"
+
+        try:
+            # single 路径（compute_single，先计算再切片，正确）
+            panel_single = engine.build_panel(
+                factor, start=start, end=end, symbols=symbols, fast_mode=True
+            )
+
+            # batch 路径（build_panel_batch，修复后应与 single 一致）
+            panels_batch = engine.build_panel_batch(
+                [factor], start=start, end=end, symbols=symbols, fast_mode=True
+            )
+            panel_batch = panels_batch.get(factor, pd.DataFrame())
+        finally:
+            # 清理注册的测试因子
+            engine._registry.pop(factor, None)
+            engine.clear_cache()
+
+        if panel_single.empty or panel_batch.empty:
+            pytest.skip("因子面板为空，跳过对比")
+
+        # 对齐公共行列
+        common_rows = panel_single.index.intersection(panel_batch.index)
+        common_cols = panel_single.columns.intersection(panel_batch.columns)
+        if len(common_rows) == 0 or len(common_cols) == 0:
+            pytest.skip("无公共行列")
+
+        s = panel_single.loc[common_rows, common_cols]
+        b = panel_batch.loc[common_rows, common_cols]
+
+        # batch 路径修复后，NaN 数量应不多于 single 路径（容差：≤5%）
+        nan_single = s.isna().sum().sum()
+        nan_batch  = b.isna().sum().sum()
+        total = s.size
+        # 修复前：batch 可能比 single 多出 20 天 × n_stocks 的 NaN
+        # 修复后：两者差距应在 5% 以内
+        assert abs(nan_batch - nan_single) / max(total, 1) <= 0.05, (
+            f"batch NaN={nan_batch}，single NaN={nan_single}，"
+            f"差距超过 5%（total={total}），说明 warm-up 修复未生效"
+        )
