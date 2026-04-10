@@ -49,7 +49,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import warnings
-from collections import deque
+from collections import deque, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
@@ -465,14 +465,13 @@ class LRUCache:
     """
     线程安全 LRU 缓存。
 
-    使用有序字典（dict + 双端队列逻辑）实现 O(1) get/put。
+    使用 collections.OrderedDict 实现，get/put 均为 O(1)。
     capacity = -1 表示无容量上限（相当于普通字典）。
     """
 
     def __init__(self, capacity: int = 256):
         self._cap   = capacity
-        self._cache: Dict[str, Any] = {}
-        self._order: deque[str] = deque()   # 最近访问排在右侧
+        self._cache: OrderedDict = OrderedDict()
         self._lock  = threading.Lock()
 
     def get(self, key: str) -> Any:
@@ -480,26 +479,21 @@ class LRUCache:
         with self._lock:
             if key not in self._cache:
                 return _MISS
-            # 移到最近访问位置
-            self._order.remove(key)
-            self._order.append(key)
+            self._cache.move_to_end(key)   # O(1)，最近访问移到末尾
             return self._cache[key]
 
     def put(self, key: str, value: Any) -> None:
         with self._lock:
             if key in self._cache:
-                self._order.remove(key)
-            elif self._cap > 0 and len(self._cache) >= self._cap:
-                # 淘汰最久未访问的条目
-                evict = self._order.popleft()
-                del self._cache[evict]
+                self._cache.move_to_end(key)   # O(1)
+            else:
+                if self._cap > 0 and len(self._cache) >= self._cap:
+                    self._cache.popitem(last=False)   # O(1)，淘汰最久未访问
             self._cache[key] = value
-            self._order.append(key)
 
     def clear(self) -> None:
         with self._lock:
             self._cache.clear()
-            self._order.clear()
 
     def __len__(self) -> int:
         return len(self._cache)

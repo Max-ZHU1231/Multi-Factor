@@ -1040,6 +1040,200 @@ class TestDataCleanerV27:
         )
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 5c. TestV28Optimizations  (v2.8 性能优化回归测试)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestV28Optimizations:
+    """v2.8: LRUCache O(1) + apply_cross_section 向量化 + build_panel_batch 流程"""
+
+    # ── Opt 3: LRUCache → OrderedDict ──────────────────────────────────────
+
+    def test_lrucache_uses_ordereddict(self):
+        """LRUCache 内部应使用 OrderedDict（O(1) move_to_end）。"""
+        from collections import OrderedDict
+        from factor_framework.dag import LRUCache
+        c = LRUCache(capacity=4)
+        assert isinstance(c._cache, OrderedDict), \
+            "LRUCache._cache 应为 OrderedDict（O(1) LRU）"
+
+    def test_lrucache_eviction_order(self):
+        """LRU 淘汰策略：最久未访问的条目被淘汰。"""
+        from factor_framework.dag import LRUCache, _MISS
+        c = LRUCache(capacity=3)
+        c.put("a", 1); c.put("b", 2); c.put("c", 3)
+        _ = c.get("a")   # a 变为最近访问
+        c.put("d", 4)    # 容量满 → 淘汰最久未访问的 b
+        assert c.get("b") is _MISS, "b 应被淘汰（最久未访问）"
+        assert c.get("a") == 1,     "a 应仍在缓存中"
+        assert c.get("c") == 3,     "c 应仍在缓存中"
+        assert c.get("d") == 4,     "d 应在缓存中"
+
+    def test_lrucache_unlimited(self):
+        """capacity=-1 时无限容量，不淘汰任何条目。"""
+        from factor_framework.dag import LRUCache, _MISS
+        c = LRUCache(capacity=-1)
+        for i in range(500):
+            c.put(str(i), i)
+        assert len(c) == 500
+        assert c.get("0") == 0
+        assert c.get("499") == 499
+
+    def test_lrucache_get_updates_order(self):
+        """get() 后再插入新条目，被 get 的条目不会被优先淘汰。"""
+        from factor_framework.dag import LRUCache, _MISS
+        c = LRUCache(capacity=2)
+        c.put("x", 10); c.put("y", 20)
+        _ = c.get("x")    # x 变为最近访问
+        c.put("z", 30)    # 容量满 → 淘汰 y（最久未访问）
+        assert c.get("y") is _MISS
+        assert c.get("x") == 10
+        assert c.get("z") == 30
+
+    def test_lrucache_thread_safe(self):
+        """LRUCache 多线程并发 put/get 不应抛出异常。"""
+        import threading
+        from factor_framework.dag import LRUCache
+        c   = LRUCache(capacity=50)
+        errors = []
+
+        def worker(tid):
+            try:
+                for j in range(100):
+                    c.put(f"k{tid}_{j}", tid * 1000 + j)
+                    c.get(f"k{tid}_{j}")
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+        assert not errors, f"并发访问抛出异常: {errors}"
+
+    # ── Opt 2: apply_cross_section 向量化快速路径 ───────────────────────────
+
+    def test_cs_rank_vectorized_matches_rowwise(self, factor_panel):
+        """cs_rank 快速路径（DataFrame.rank）应与逐行结果一致。"""
+        from factor_framework.factor_engine import FactorEngine
+        from factor_framework.operators     import cs_rank
+
+        result_fast = FactorEngine.apply_cross_section(factor_panel, cs_rank)
+        # 逐行参考实现
+        ref_rows = {}
+        for date, row in factor_panel.iterrows():
+            x = row.dropna()
+            ref_rows[date] = x.rank(pct=True)
+        result_ref = pd.DataFrame(ref_rows).T.reindex(columns=factor_panel.columns)
+
+        pd.testing.assert_frame_equal(
+            result_fast.fillna(-1), result_ref.fillna(-1),
+            check_names=False, atol=1e-9,
+        )
+
+    def test_cs_zscore_vectorized_matches_rowwise(self, factor_panel):
+        """cs_zscore 快速路径（numpy broadcast）应与逐行结果一致。"""
+        from factor_framework.factor_engine import FactorEngine
+        from factor_framework.operators     import cs_zscore
+
+        result_fast = FactorEngine.apply_cross_section(factor_panel, cs_zscore)
+        ref_rows = {}
+        for date, row in factor_panel.iterrows():
+            x = row.dropna()
+            mu, sig = x.mean(), x.std(ddof=1)
+            ref_rows[date] = (x - mu) / sig if sig > 0 else pd.Series(np.nan, index=x.index)
+        result_ref = pd.DataFrame(ref_rows).T.reindex(columns=factor_panel.columns)
+
+        pd.testing.assert_frame_equal(
+            result_fast.fillna(-999), result_ref.fillna(-999),
+            check_names=False, atol=1e-6,
+        )
+
+    def test_cs_winsorize_vectorized_matches_rowwise(self, factor_panel):
+        """cs_winsorize 快速路径（numpy clip）应与逐行结果一致。"""
+        from factor_framework.factor_engine import FactorEngine
+        from factor_framework.operators     import cs_winsorize
+
+        result_fast = FactorEngine.apply_cross_section(factor_panel, cs_winsorize)
+        ref_rows = {}
+        for date, row in factor_panel.iterrows():
+            ref_rows[date] = cs_winsorize(row.dropna())
+        result_ref = pd.DataFrame(ref_rows).T.reindex(columns=factor_panel.columns)
+
+        pd.testing.assert_frame_equal(
+            result_fast.fillna(-999), result_ref.fillna(-999),
+            check_names=False, atol=1e-9,
+        )
+
+    def test_apply_cross_section_nan_preserved(self, factor_panel):
+        """apply_cross_section 快速路径应保留 NaN 位置不变。"""
+        from factor_framework.factor_engine import FactorEngine
+        from factor_framework.operators     import cs_rank, cs_zscore, cs_winsorize
+
+        for func in (cs_rank, cs_zscore, cs_winsorize):
+            result = FactorEngine.apply_cross_section(factor_panel, func)
+            # NaN 位置应与输入一致
+            input_nan  = factor_panel.isna()
+            result_nan = result.isna()
+            assert (result_nan[input_nan]).all(axis=None), \
+                f"{func.__name__}: 输入的 NaN 位置在输出中应保持为 NaN"
+
+    # ── Opt 1: run_batch_from_panels ────────────────────────────────────────
+
+    def test_run_batch_from_panels_returns_reports(self, factor_panel, return_panel):
+        """run_batch_from_panels 应返回包含所有因子的 FactorReport 字典。"""
+        import tempfile, os, warnings as _warnings
+        from factor_framework.pipeline import FactorPipeline
+
+        rng = np.random.default_rng(99)
+        with tempfile.TemporaryDirectory() as tmp:
+            # 写入 2 只假股票的 CSV
+            n = 120
+            dates = pd.date_range("20200101", periods=n, freq="B").strftime("%Y%m%d").tolist()
+            for sym in ["AA_SZ", "BB_SZ"]:
+                pd.DataFrame({
+                    "交易日": dates,
+                    "收盘价": rng.uniform(10, 20, n),
+                    "开盘价": rng.uniform(10, 20, n),
+                    "最高价": rng.uniform(15, 25, n),
+                    "最低价": rng.uniform(5,  15, n),
+                    "成交量": rng.uniform(1e6, 1e7, n),
+                    "成交额": rng.uniform(1e7, 1e8, n),
+                    "涨跌幅": rng.uniform(-0.1, 0.1, n),
+                    "换手率": rng.uniform(0.1, 5.0, n),
+                }).to_csv(os.path.join(tmp, f"{sym}.csv"), index=False)
+
+            pipe = FactorPipeline(stocks_dir=tmp, verbose=False)
+            pipe.register_factor("f1", lambda df: df["收盘价"].rolling(5).mean())
+            pipe.register_factor("f2", lambda df: df["收盘价"].rolling(10).mean())
+
+            panels = pipe.engine.build_panel_batch(
+                ["f1", "f2"], start="20200201", end="20201231",
+            )
+            ret_panel = pipe.engine.build_return_panel(
+                forward=5, start="20200201", end="20201231",
+            )
+            close_panel = pd.DataFrame(
+                rng.uniform(10, 20, (len(ret_panel), 2)),
+                index=ret_panel.index, columns=["AA_SZ", "BB_SZ"],
+            )
+
+            with _warnings.catch_warnings():
+                # 2 只股票的极小面板中存在全 NaN 行，nanmedian 会产生 RuntimeWarning
+                _warnings.simplefilter("ignore", RuntimeWarning)
+                reports = pipe.run_batch_from_panels(
+                    factor_panels=panels,
+                    return_panel=ret_panel,
+                    close_panel=close_panel,
+                    forward=5,
+                )
+
+        assert set(reports.keys()) == {"f1", "f2"}, \
+            "run_batch_from_panels 应返回所有因子的报告"
+        for name, rpt in reports.items():
+            assert hasattr(rpt, "ic_series"), f"{name}: 报告应含 ic_series"
+            assert hasattr(rpt, "layer_ret"), f"{name}: 报告应含 layer_ret"
+
+
 
 
 class TestFactorZoo:

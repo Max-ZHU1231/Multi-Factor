@@ -401,6 +401,130 @@ class FactorPipeline:
         print("\n✓ 流程完成。")
         return report
 
+    # ── 批量多因子运行（面板预构建版）──────────────────────────────────────────
+
+    def run_batch_from_panels(
+        self,
+        factor_panels:   Dict[str, pd.DataFrame],
+        return_panel:    pd.DataFrame,
+        close_panel:     pd.DataFrame,
+        forward:         int = 21,
+        n_groups:        int = 5,
+        direction:       int = 1,
+        standardize:     Optional[str] = "rank",
+        neutralize:      bool = False,
+        winsorize:       bool = True,
+        ic_method:       str = "rank",
+        ic_forward_list: List[int] = (1, 5, 10, 21, 60),
+        periods_per_year: int = 252,
+        rf:              float = 0.0,
+        cost_per_side:   float = 0.002,
+    ) -> Dict[str, "FactorReport"]:
+        """
+        对已预构建的因子面板字典批量执行检验流程（无重复读盘）。
+
+        与逐因子调用 run() 相比，此方法：
+        - 收益率面板和价格面板只传入一次（调用方负责构建）
+        - 免去每因子重建 ThreadPoolExecutor 的开销
+        - 截面预处理在此统一做（每因子仍独立标准化）
+
+        Parameters
+        ----------
+        factor_panels   : {factor_name: raw_factor_panel}（build_panel_batch 的输出）
+        return_panel    : 已构建的未来收益率面板
+        close_panel     : 已构建的收盘价面板（用于 IC 衰减）
+        其余参数        : 同 run()
+
+        Returns
+        -------
+        dict: {factor_name: FactorReport}
+        """
+        # 截断尾部 NaN（一次性对齐，所有因子共用）
+        valid_ret_idx = return_panel.dropna(how="all").index
+        n_dropped = len(return_panel) - len(valid_ret_idx)
+        if n_dropped > 0:
+            warnings.warn(
+                f"[尾部截断] return_panel 末尾 {n_dropped} 个交易日因 "
+                f"forward={forward} 天 shift 导致收益率全为 NaN，"
+                f"已同步截断所有因子面板对应行。"
+            )
+            return_panel = return_panel.loc[valid_ret_idx]
+
+        reports: Dict[str, FactorReport] = {}
+        total = len(factor_panels)
+
+        for i, (factor_name, raw_panel) in enumerate(factor_panels.items(), 1):
+            print(f"\n[{i:02d}/{total}] 检验因子: {factor_name} ...")
+            try:
+                if raw_panel.empty:
+                    raise ValueError("因子面板为空")
+
+                # 对齐尾部截断
+                factor_panel = raw_panel.reindex(valid_ret_idx)
+
+                # ── 截面预处理 ──────────────────────────────────────────────
+                if winsorize:
+                    factor_panel = self.engine.apply_cross_section(factor_panel, cs_winsorize)
+
+                if neutralize and self.engine.industry_map is not None:
+                    self.engine.register("__mktcap__", lambda df: df["总市值（万元）"])
+                    mktcap_panel = self.engine.build_panel("__mktcap__")
+                    del self.engine._registry["__mktcap__"]
+                    factor_panel = neutralize_regression(
+                        factor_panel, mktcap_panel,
+                        industry_map=self.engine.industry_map,
+                    )
+                elif neutralize:
+                    warnings.warn("neutralize=True 但 industry_map 为空，跳过中性化。")
+
+                if standardize == "rank":
+                    factor_panel = self.engine.apply_cross_section(factor_panel, cs_rank)
+                elif standardize == "zscore":
+                    factor_panel = self.engine.apply_cross_section(factor_panel, cs_zscore)
+
+                # ── IC 分析 ─────────────────────────────────────────────────
+                ic_series   = compute_ic(factor_panel, return_panel, method=ic_method)
+                ic_s        = ic_stats(ic_series, annualize_periods=periods_per_year)
+                ic_nw       = ic_significance(
+                    ic_series, lags=max(1, int(len(ic_series) ** 0.25))
+                )
+                ic_decay_df = ic_decay(
+                    factor_panel, close_panel,
+                    forward_periods=ic_forward_list, method=ic_method,
+                )
+
+                # ── 分层回测 ────────────────────────────────────────────────
+                layer_ret = layer_backtest(
+                    factor_panel, return_panel,
+                    n_groups=n_groups, direction=direction,
+                )
+                ls_stats_ = long_short_stats(
+                    layer_ret, periods_per_year=periods_per_year, rf=rf,
+                )
+
+                # ── 换手率 ──────────────────────────────────────────────────
+                turnover_ = turnover_analysis(
+                    factor_panel, n_groups=n_groups, direction=direction,
+                    cost_per_side=cost_per_side,
+                )
+
+                reports[factor_name] = FactorReport(
+                    factor_name  = factor_name,
+                    ic_series    = ic_series,
+                    ic_stats     = ic_s,
+                    ic_nw        = ic_nw,
+                    ic_decay_df  = ic_decay_df,
+                    layer_ret    = layer_ret,
+                    ls_stats     = ls_stats_,
+                    turnover     = turnover_,
+                    factor_panel = factor_panel,
+                    return_panel = return_panel,
+                )
+            except Exception as exc:
+                warnings.warn(f"因子 '{factor_name}' 检验失败: {exc}")
+
+        return reports
+
     # ── 批量多因子运行 ─────────────────────────────────────────────────────────
 
     def run_batch(

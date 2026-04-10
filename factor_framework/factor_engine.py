@@ -802,15 +802,48 @@ class FactorEngine:
         Returns
         -------
         与 panel 等形状的横截面处理后面板
+
+        实现说明
+        --------
+        对常用无状态横截面算子（cs_rank / cs_zscore / cs_winsorize），
+        走全面板向量化快速路径（无 Python 循环，10–50x 加速）；
+        其他算子或有 industry 参数时降级到 panel.apply(axis=1) / iterrows。
         """
-        # ── 快速路径：无 industry，尝试 panel.apply(axis=1) ───────────────────
+        # ── 快速路径 1：cs_rank → DataFrame.rank(axis=1) ────────────────────
+        func_name = getattr(cs_func, "__name__", "")
+        if industry is None and func_name == "cs_rank":
+            return panel.rank(axis=1, pct=True, na_option="keep")
+
+        # ── 快速路径 2：cs_zscore → 逐行 (x-mean)/std（纯 numpy，无循环）──
+        if industry is None and func_name == "cs_zscore":
+            arr   = panel.values.astype(float)
+            mu    = np.nanmean(arr, axis=1, keepdims=True)
+            sigma = np.nanstd(arr, axis=1, ddof=1, keepdims=True)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                out = np.where(sigma == 0, np.nan, (arr - mu) / sigma)
+            out[np.isnan(arr)] = np.nan
+            return pd.DataFrame(out, index=panel.index, columns=panel.columns)
+
+        # ── 快速路径 3：cs_winsorize → 逐行 MAD clip（纯 numpy，无循环）───
+        if industry is None and func_name == "cs_winsorize":
+            arr   = panel.values.astype(float)
+            n_std = 3.0  # cs_winsorize 默认值
+            with np.errstate(invalid="ignore"):
+                med   = np.nanmedian(arr, axis=1, keepdims=True)          # (T,1)
+                mad   = np.nanmedian(np.abs(arr - med), axis=1, keepdims=True)  # (T,1)
+            lower = med - n_std * mad
+            upper = med + n_std * mad
+            with np.errstate(invalid="ignore"):
+                out = np.clip(arr, lower, upper)
+            out[np.isnan(arr)] = np.nan
+            return pd.DataFrame(out, index=panel.index, columns=panel.columns)
+
+        # ── 快速路径 4：无 industry，尝试 panel.apply(axis=1) ────────────────
         if industry is None:
             try:
                 result = panel.apply(cs_func, axis=1)
-                # cs_func 可能返回 scalar（如 rank），此时 apply 结果是 Series
                 if isinstance(result, pd.Series):
-                    # 标量输出：通常不是横截面算子的预期用法，降级到逐行
-                    pass
+                    pass   # 标量输出，降级到逐行
                 else:
                     return result.reindex(columns=panel.columns)
             except Exception:

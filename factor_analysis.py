@@ -123,8 +123,16 @@ def _color_by_value(val: float, vmin: float, vmax: float,
 
 def build_all_reports(cfg: dict) -> dict:
     """
-    依次对每个内置因子执行完整检验，收集 FactorReport 对象。
+    批量对每个内置因子执行完整检验，收集 FactorReport 对象。
     返回 { factor_name: FactorReport }
+
+    优化说明（v2.8）
+    ----------------
+    1. 调用 build_panel_batch() 一次性读取所有股票文件，构建全部因子面板
+       （共享读盘缓存 + CSE，读盘只发生 1 次而非 N_FACTORS 次）。
+    2. 收益率面板和收盘价面板也只构建一次。
+    3. 每个因子的截面预处理 / IC / 回测通过 run_batch_from_panels() 串行完成。
+    预期总耗时降低约 40–60%（vs. 逐因子 pipe.run()）。
     """
     pipe = FactorPipeline(
         stocks_dir  = cfg["stocks_dir"],
@@ -133,41 +141,70 @@ def build_all_reports(cfg: dict) -> dict:
     )
     pipe.register_builtins()
 
-    reports = {}
-    failed  = []
-    total   = len(ALL_FACTORS)
-
     print(f"\n{'='*64}")
-    print(f"  开始批量分析  共 {total} 个因子")
+    print(f"  开始批量分析  共 {len(ALL_FACTORS)} 个因子")
     print(f"  时间范围: {cfg['start']} ~ {cfg['end']}")
     print(f"  预测期: forward={cfg['forward']} 天  分层数: {cfg['n_groups']}")
+    print(f"  模式: 批量面板预构建（一次读盘 + CSE）")
     print(f"{'='*64}\n")
 
-    for i, name in enumerate(ALL_FACTORS, 1):
-        print(f"\n[{i:02d}/{total}] ── {name} ──")
-        try:
-            rpt = pipe.run(
-                factor_name      = name,
-                start            = cfg["start"],
-                end              = cfg["end"],
-                forward          = cfg["forward"],
-                n_groups         = cfg["n_groups"],
-                ic_method        = cfg["ic_method"],
-                standardize      = cfg["standardize"],
-                winsorize        = cfg["winsorize"],
-                neutralize       = cfg["neutralize"],
-                periods_per_year = cfg["periods_per_year"],
-                rf               = cfg["rf"],
-                cost_per_side    = cfg["cost_per_side"],
-            )
-            reports[name] = rpt
-        except Exception as exc:
-            warnings.warn(f"因子 '{name}' 失败：{exc}")
-            failed.append(name)
+    engine = pipe.engine
 
+    # ── Step 1：一次性批量构建所有因子面板（共享读盘缓存 + CSE）──────────────
+    print(f"[批量] 构建 {len(ALL_FACTORS)} 个因子面板（build_panel_batch）...")
+    all_panels = engine.build_panel_batch(
+        factor_names = ALL_FACTORS,
+        start        = cfg["start"],
+        end          = cfg["end"],
+        fast_mode    = True,
+        n_jobs       = cfg.get("n_jobs", 8),
+    )
+    succeeded = [n for n, p in all_panels.items() if not p.empty]
+    print(f"  ✓ 成功: {len(succeeded)}/{len(ALL_FACTORS)} 个因子面板已构建\n")
+
+    # ── Step 2：构建收益率面板（仅一次）──────────────────────────────────────
+    print(f"[批量] 构建收益率面板（forward={cfg['forward']} 天）...")
+    return_panel = engine.build_return_panel(
+        forward  = cfg["forward"],
+        start    = cfg["start"],
+        end      = cfg["end"],
+        fast_mode= True,
+    )
+    print(f"  ✓ 收益率面板: {return_panel.shape}\n")
+
+    # ── Step 3：构建收盘价面板（IC 衰减用，仅一次）───────────────────────────
+    print(f"[批量] 构建收盘价面板（IC 衰减）...")
+    engine.register("__close__", lambda df: df["收盘价"])
+    close_panel = engine.build_panel(
+        "__close__",
+        start    = cfg["start"],
+        end      = cfg["end"],
+        fast_mode= True,
+    )
+    del engine._registry["__close__"]
+    print(f"  ✓ 收盘价面板: {close_panel.shape}\n")
+
+    # ── Step 4：逐因子执行检验（复用已有面板，无重复读盘）─────────────────────
+    valid_panels = {n: p for n, p in all_panels.items() if not p.empty}
+    reports = pipe.run_batch_from_panels(
+        factor_panels    = valid_panels,
+        return_panel     = return_panel,
+        close_panel      = close_panel,
+        forward          = cfg["forward"],
+        n_groups         = cfg["n_groups"],
+        ic_method        = cfg["ic_method"],
+        standardize      = cfg["standardize"],
+        winsorize        = cfg["winsorize"],
+        neutralize       = cfg["neutralize"],
+        periods_per_year = cfg["periods_per_year"],
+        rf               = cfg["rf"],
+        cost_per_side    = cfg["cost_per_side"],
+    )
+
+    failed = [n for n in ALL_FACTORS if n not in reports]
     if failed:
         print(f"\n⚠ 以下因子运行失败，已跳过：{failed}")
-    print(f"\n✓ 成功完成 {len(reports)}/{total} 个因子。\n")
+    print(f"\n✓ 成功完成 {len(reports)}/{len(ALL_FACTORS)} 个因子。\n")
     return reports
 
 
