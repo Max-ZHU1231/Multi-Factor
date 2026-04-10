@@ -7,12 +7,12 @@ backtest_demo.py
 因子 2: vol_20d        —— 20 日波动率（低波动异象，负向信号）
 因子 3: value_pb       —— 价值因子（1/市净率）
 
-流程（v2.8 批量流水线，一次读盘，共享缓存）：
+流程（v2.9 批量流水线，一次读盘，共享缓存）：
   1. build_panel_batch  → 三因子面板一次性构建
   2. build_return_panel → 月度收益率面板（forward=21 天）
-  3. build_panel        → 收盘价面板（供 IC 衰减分析）
-  4. run_batch_from_panels → 截面标准化 / IC 分析 / 分层回测 / 换手率分析
-  5. 打印汇总 + 保存 CSV + 绘制对比图
+  3. run_batch_from_panels → 截面标准化 / IC 分析 / 分层回测 / 换手率分析
+     （BUG-9 已修复：IC 衰减面板在内部自动构建，与主 IC 同源）
+  4. 打印汇总 + 保存 CSV + 绘制对比图
 
 用法：
   & ".venv\\Scripts\\python.exe" backtest_demo.py
@@ -114,7 +114,7 @@ print(f"\n  ✓ Step 1 完成，耗时 {time.time() - t1:.1f}s")
 # Step 2: 构建收益率面板
 # ═══════════════════════════════════════════════════════════════════════════════
 
-print("\n\n[Step 2/4] 构建月度收益率面板...")
+print("\n\n[Step 2/3] 构建月度收益率面板（主 forward）...")
 t2 = time.time()
 
 return_panel = engine.build_return_panel(
@@ -127,30 +127,12 @@ print(f"  收益率面板: {return_panel.shape[0]} 日 × {return_panel.shape[1]
 print(f"  ✓ Step 2 完成，耗时 {time.time() - t2:.1f}s")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Step 3: 构建收盘价面板（IC 衰减分析用）
+# Step 3: 批量因子检验（截面处理 + IC 分析 + 分层回测 + 换手率）
 # ═══════════════════════════════════════════════════════════════════════════════
+# BUG-9 已修复：IC 衰减面板在 pipeline 内部自动为每个 ic_forward_list 中的 forward
+# 构建同源收益率面板，与主 IC 路径完全一致，不再需要独立的 close_panel 步骤。
 
-print("\n\n[Step 3/4] 构建收盘价面板（IC 衰减用）...")
-t3 = time.time()
-
-engine.register("__close__", lambda df: df["收盘价"])
-close_panel = engine.build_panel(
-    "__close__",
-    start     = CFG["start"],
-    end       = CFG["end"],
-    fast_mode = True,
-    n_jobs    = CFG["n_jobs"],
-)
-del engine._registry["__close__"]
-
-print(f"  收盘价面板: {close_panel.shape[0]} 日 × {close_panel.shape[1]} 只股票")
-print(f"  ✓ Step 3 完成，耗时 {time.time() - t3:.1f}s")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Step 4: 批量因子检验（截面处理 + IC 分析 + 分层回测 + 换手率）
-# ═══════════════════════════════════════════════════════════════════════════════
-
-print("\n\n[Step 4/4] 批量因子检验...")
+print("\n\n[Step 3/3] 批量因子检验（IC分析 + 分层回测 + 换手率）...")
 t4 = time.time()
 
 if not valid_panels:
@@ -160,7 +142,6 @@ if not valid_panels:
 reports = pipe.run_batch_from_panels(
     factor_panels    = valid_panels,
     return_panel     = return_panel,
-    close_panel      = close_panel,
     forward          = CFG["forward"],
     n_groups         = CFG["n_groups"],
     ic_method        = CFG["ic_method"],
@@ -174,7 +155,7 @@ reports = pipe.run_batch_from_panels(
     cost_per_side    = CFG["cost_per_side"],
 )
 
-print(f"\n  ✓ Step 4 完成，耗时 {time.time() - t4:.1f}s")
+print(f"\n  ✓ Step 3 完成，耗时 {time.time() - t4:.1f}s")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 打印汇总报告

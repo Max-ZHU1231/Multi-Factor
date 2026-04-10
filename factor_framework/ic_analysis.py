@@ -199,9 +199,10 @@ def ic_significance(
 
 def ic_decay(
     factor_panel:      pd.DataFrame,
-    price_panel:       pd.DataFrame,
+    price_panel:       Optional[pd.DataFrame] = None,
     forward_periods:   List[int] = (1, 5, 10, 20, 60),
     method:            str = "rank",
+    return_panels:     Optional[Dict[int, pd.DataFrame]] = None,
 ) -> pd.DataFrame:
     """
     计算不同预测期的 IC，分析因子信息的衰减速度。
@@ -209,31 +210,71 @@ def ic_decay(
     Parameters
     ----------
     factor_panel    : (日期 × 股票) 因子面板
-    price_panel     : (日期 × 股票) 收盘价面板
-    forward_periods : 预测期列表（天数）
+    price_panel     : (日期 × 股票) 收盘价面板（与 return_panels 二选一）
+    forward_periods : 预测期列表（天数，仅在 price_panel 模式下使用）
     method          : 'rank' 或 'normal'
+    return_panels   : {forward_days: (日期 × 股票) 已构建的收益率面板}（优先）
+                      若提供，则直接使用，不从 price_panel 重算收益率。
+                      这消除了 pipeline 中主 IC 路径（有 T+1）与 ic_decay
+                      内部重算路径（无 T+1）之间的双路径不一致问题（BUG-9）。
 
     Returns
     -------
     pd.DataFrame，columns = ['forward','mean_ic','std_ic','icir','win_rate','t_stat']
 
-    实现说明（v2.9.1 修复）
-    -----------------------
-    旧实现：price_panel.pct_change(fwd, axis=0).shift(-fwd)
-    问题：
-    1. pct_change 在面板上逐行计算，遇到停牌 NaN 会错误传播（应逐列计算）。
-    2. 先截断整个 price_panel，然后 factor_panel 未同步截断，导致
-       compute_ic 的日期范围不一致（靠近尾部的因子数据被浪费）。
-    3. 使用前复权价格，跨越除权事件时历史价格被回溯修改（隐式前瞻）。
+    实现说明
+    --------
+    优先路径（return_panels 传入）：BUG-9 修复
+        - 直接消费调用方已构建的收益率面板（与主 IC 同源）
+        - 收益率语义与 build_return_panel 完全一致（含 T+1 shift）
+        - forward_periods 参数从 return_panels.keys() 推导，保持一致性
 
-    新实现：
-    - 逐列（每只股票）计算 price.shift(-fwd) / price - 1，与 build_return_panel 一致
-    - factor_panel 与 return_panel 取公共行（intersection），不浪费数据
-    - 尾部截断改为：在计算完收益后，丢弃收益为全 NaN 的行（自然截断）
-    - T+1 滞后：在 ic_decay 里不额外加，因为 factor_panel 已由 pipeline
-      的 build_return_panel 统一处理 T+1（ic_decay 只做衰减分析，不重复加）
+    回退路径（仅 price_panel 传入）：向后兼容
+        - 逐列计算 price.shift(-fwd) / price - 1
+        - 不加 T+1 shift（与旧实现保持一致，但与主 IC 路径存在语义差异）
+        - 保留用于独立调用 ic_decay 而不经过 pipeline 的场景
     """
     import warnings
+
+    # ── 优先路径：使用调用方传入的收益率面板（BUG-9 修复）─────────────────
+    if return_panels is not None:
+        rows = []
+        for fwd, ret_panel in sorted(return_panels.items()):
+            # 取公共日期对齐
+            common_idx = factor_panel.index.intersection(ret_panel.index)
+            if len(common_idx) == 0:
+                rows.append({"forward": fwd, "mean_ic": np.nan, "std_ic": np.nan,
+                             "icir": np.nan, "win_rate": np.nan, "t_stat": np.nan})
+                continue
+
+            # 丢弃收益全为 NaN 的行（尾部 forward+1 行因 T+1 shift 产生）
+            valid_ret_rows = ret_panel.loc[common_idx].dropna(how="all").index
+            if len(valid_ret_rows) == 0:
+                rows.append({"forward": fwd, "mean_ic": np.nan, "std_ic": np.nan,
+                             "icir": np.nan, "win_rate": np.nan, "t_stat": np.nan})
+                continue
+
+            fp = factor_panel.loc[valid_ret_rows]
+            rp = ret_panel.loc[valid_ret_rows]
+
+            ic_series = compute_ic(fp, rp, method=method)
+            st        = ic_stats(ic_series)
+            rows.append({
+                "forward":  fwd,
+                "mean_ic":  st["mean_ic"],
+                "std_ic":   st["std_ic"],
+                "icir":     st["icir"],
+                "win_rate": st["win_rate"],
+                "t_stat":   st["t_stat"],
+            })
+        return pd.DataFrame(rows).set_index("forward")
+
+    # ── 回退路径：从 price_panel 重算收益率（向后兼容）────────────────────
+    if price_panel is None:
+        raise ValueError(
+            "ic_decay：price_panel 和 return_panels 不能同时为 None，"
+            "请至少提供其中一个。"
+        )
 
     max_fwd = max(forward_periods)
     if len(price_panel) <= max_fwd:
@@ -251,9 +292,9 @@ def ic_decay(
 
     rows = []
     for fwd in forward_periods:
-        # ── 逐列构建未来 fwd 日收益率面板（与 build_return_panel 一致）────────
+        # 逐列构建未来 fwd 日收益率面板（与 build_return_panel 公式一致）
         # price.shift(-fwd) / price - 1：每只股票独立计算，NaN 不跨列传播。
-        # 不加 T+1 shift（ic_decay 仅做衰减对比，T+1 已在 return_panel 中处理）。
+        # 注意：此路径不含 T+1 shift，与主 IC 路径存在语义差异（BUG-9 的根源）
         ret_panel = price_panel.shift(-fwd) / price_panel.replace(0, np.nan) - 1
 
         # 丢弃尾部全 NaN 行（即原 price_panel 末尾 fwd 行）

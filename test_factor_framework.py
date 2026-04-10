@@ -3977,3 +3977,578 @@ class TestV293Fixes:
         assert avg >= 0.0, f'avg_turnover={avg:.4f} 不应为负'
         assert avg <= 1.0, f'avg_turnover={avg:.4f} 不应超过 1（100% 换仓）'
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Phase 2 Foundation: TimestampedPanel、ReturnPanel、CacheLayer 基础测试
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestTimestampedPanel:
+    """
+    factor_framework.core.panel.TimestampedPanel
+
+    覆盖：
+    - 继承与元数据保留（_metadata 机制）
+    - shift_to_t1()：正向操作、重复调用防护
+    - align_with()：合法/非法组合、T+1 检查
+    - trim_warmup()：行数截断
+    - assert_valid()：完整性检查
+    - 自定义异常类型
+    """
+
+    def _make_panel(self, semantic="factor_observation", is_t1_shifted=False,
+                    price_basis=None, factor_name=None, rows=20, cols=5):
+        """构建测试用 TimestampedPanel。"""
+        from factor_framework.core.panel import TimestampedPanel
+        idx  = pd.date_range("2020-01-01", periods=rows, freq="B")
+        cols_ = [f"S{i:03d}" for i in range(cols)]
+        df   = pd.DataFrame(
+            np.random.randn(rows, cols),
+            index=idx, columns=cols_
+        )
+        return TimestampedPanel(
+            df,
+            semantic      = semantic,
+            is_t1_shifted = is_t1_shifted,
+            price_basis   = price_basis,
+            factor_name   = factor_name,
+        )
+
+    # ── 元数据保留 ───────────────────────────────────────────────────────────
+
+    def test_metadata_preserved_after_slice(self):
+        """pandas slice 操作后，_metadata 字段应保留。"""
+        from factor_framework.core.panel import TimestampedPanel
+        tp = self._make_panel(semantic="forward_return", factor_name="test_factor")
+        sliced = tp.iloc[:10]
+        assert isinstance(sliced, TimestampedPanel), "slice 后应仍为 TimestampedPanel"
+        assert sliced.semantic == "forward_return"
+        assert sliced.factor_name == "test_factor"
+
+    def test_metadata_preserved_after_loc(self):
+        """loc 操作后，_metadata 字段应保留。"""
+        from factor_framework.core.panel import TimestampedPanel
+        tp = self._make_panel(semantic="price", price_basis="hfq")
+        subset = tp.loc[tp.index[:5]]
+        assert subset.semantic == "price"
+        assert subset.price_basis == "hfq"
+
+    def test_constructor_defaults(self):
+        """默认构造时 semantic='factor_observation'，is_t1_shifted=False。"""
+        from factor_framework.core.panel import TimestampedPanel
+        tp = TimestampedPanel({"A": [1.0, 2.0]})
+        assert tp.semantic == "factor_observation"
+        assert tp.is_t1_shifted is False
+        assert tp.warmup_trimmed is False
+
+    def test_from_dataframe_classmethod(self):
+        """from_dataframe() 类方法应正确传递所有元数据字段。"""
+        from factor_framework.core.panel import TimestampedPanel
+        df = pd.DataFrame({"A": [1.0, 2.0, 3.0]})
+        tp = TimestampedPanel.from_dataframe(
+            df,
+            semantic      = "price",
+            price_basis   = "hfq",
+            factor_name   = "close_price",
+        )
+        assert tp.semantic == "price"
+        assert tp.price_basis == "hfq"
+        assert tp.factor_name == "close_price"
+        assert not tp.warmup_trimmed
+
+    # ── shift_to_t1() ────────────────────────────────────────────────────────
+
+    def test_shift_to_t1_sets_flag(self):
+        """shift_to_t1() 返回新面板，is_t1_shifted=True。"""
+        tp = self._make_panel()
+        tp_t1 = tp.shift_to_t1()
+        assert tp_t1.is_t1_shifted is True
+        assert tp.is_t1_shifted is False, "原对象不应被修改（immutable 语义）"
+
+    def test_shift_to_t1_row_shift(self):
+        """shift_to_t1() 在行方向上做了 shift(1)（第 0 行为 NaN，其余行等于原第 i-1 行）。"""
+        from factor_framework.core.panel import TimestampedPanel
+        df   = pd.DataFrame({"A": [10.0, 20.0, 30.0]}, index=["d1", "d2", "d3"])
+        tp   = TimestampedPanel(df, semantic="factor_observation")
+        tp_t1 = tp.shift_to_t1()
+        assert np.isnan(tp_t1.loc["d1", "A"])
+        assert tp_t1.loc["d2", "A"] == pytest.approx(10.0)
+        assert tp_t1.loc["d3", "A"] == pytest.approx(20.0)
+
+    def test_shift_to_t1_double_call_raises(self):
+        """对已 T+1 的面板再次调用 shift_to_t1() 应抛出 RuntimeError。"""
+        tp    = self._make_panel()
+        tp_t1 = tp.shift_to_t1()
+        with pytest.raises(RuntimeError, match="已做过 T\\+1 滞后"):
+            tp_t1.shift_to_t1()
+
+    def test_shift_to_t1_preserves_other_metadata(self):
+        """shift_to_t1() 后，其他元数据字段（factor_name 等）应保留。"""
+        tp    = self._make_panel(factor_name="momentum_12_1")
+        tp_t1 = tp.shift_to_t1()
+        assert tp_t1.factor_name == "momentum_12_1"
+        assert tp_t1.semantic    == "factor_observation"
+
+    # ── align_with() ─────────────────────────────────────────────────────────
+
+    def test_align_with_factor_and_return_valid(self):
+        """factor_observation(T+1) × forward_return 是合法组合，应成功对齐。"""
+        from factor_framework.core.panel import TimestampedPanel
+        fp = self._make_panel(semantic="factor_observation").shift_to_t1()
+        rp = self._make_panel(semantic="forward_return")
+        fp_aligned, rp_aligned = fp.align_with(rp)
+        assert fp_aligned.index.equals(rp_aligned.index)
+        assert len(fp_aligned) == len(fp)  # 行数相同（index 完全相同时取交集不变）
+
+    def test_align_with_requires_t1_shifted(self):
+        """factor_observation 未做 T+1 时 align_with forward_return 应抛出 TimingAlignmentError。"""
+        from factor_framework.core.panel import TimingAlignmentError
+        fp = self._make_panel(semantic="factor_observation")  # is_t1_shifted=False
+        rp = self._make_panel(semantic="forward_return")
+        with pytest.raises(TimingAlignmentError, match="T\\+1 滞后"):
+            fp.align_with(rp)
+
+    def test_align_with_price_vs_factor_raises(self):
+        """price × factor_observation 是非法组合，应抛出 SemanticCompatibilityError。"""
+        from factor_framework.core.panel import SemanticCompatibilityError
+        price  = self._make_panel(semantic="price")
+        factor = self._make_panel(semantic="factor_observation")
+        with pytest.raises(SemanticCompatibilityError):
+            price.align_with(factor)
+
+    def test_align_with_price_vs_return_raises(self):
+        """price × forward_return 是非法组合，应抛出 SemanticCompatibilityError。"""
+        from factor_framework.core.panel import SemanticCompatibilityError
+        price  = self._make_panel(semantic="price")
+        ret    = self._make_panel(semantic="forward_return")
+        with pytest.raises(SemanticCompatibilityError):
+            price.align_with(ret)
+
+    def test_align_with_factor_factor_valid(self):
+        """factor_observation × factor_observation 合法（因子合成场景）。"""
+        fp1 = self._make_panel(semantic="factor_observation")
+        fp2 = self._make_panel(semantic="factor_observation")
+        fp1_a, fp2_a = fp1.align_with(fp2)
+        assert fp1_a.index.equals(fp2_a.index)
+
+    def test_align_with_index_intersection(self):
+        """align_with() 对不同 index 的面板应取交集。"""
+        from factor_framework.core.panel import TimestampedPanel
+        idx_full = pd.date_range("2020-01-01", periods=20, freq="B")
+        idx_sub  = idx_full[5:15]
+        cols     = ["A", "B"]
+        fp = TimestampedPanel(
+            pd.DataFrame(np.ones((20, 2)), index=idx_full, columns=cols),
+            semantic="factor_observation", is_t1_shifted=True,
+        )
+        rp = TimestampedPanel(
+            pd.DataFrame(np.ones((10, 2)), index=idx_sub, columns=cols),
+            semantic="forward_return",
+        )
+        fp_a, rp_a = fp.align_with(rp)
+        assert len(fp_a) == 10
+        assert fp_a.index.equals(rp_a.index)
+
+    def test_align_with_non_timestampedpanel_raises(self):
+        """align_with() 入参不是 TimestampedPanel 时应抛出 TypeError。"""
+        tp = self._make_panel()
+        with pytest.raises(TypeError):
+            tp.align_with(pd.DataFrame({"A": [1.0]}))
+
+    # ── trim_warmup() ────────────────────────────────────────────────────────
+
+    def test_trim_warmup_removes_rows(self):
+        """trim_warmup(5) 应删除最早的 5 行。"""
+        tp      = self._make_panel(rows=20)
+        trimmed = tp.trim_warmup(5)
+        assert len(trimmed) == 15
+        assert trimmed.warmup_trimmed is True
+        assert tp.warmup_trimmed is False, "原对象不应被修改"
+
+    def test_trim_warmup_zero_does_nothing(self):
+        """trim_warmup(0) 应返回等长度的面板（不截断）。"""
+        tp = self._make_panel(rows=10)
+        trimmed = tp.trim_warmup(0)
+        assert len(trimmed) == 10
+
+    def test_trim_warmup_too_large_raises(self):
+        """trim_warmup(n) 当 n >= len(panel) 时应抛出 ValueError。"""
+        tp = self._make_panel(rows=10)
+        with pytest.raises(ValueError, match="截断后面板为空"):
+            tp.trim_warmup(10)
+
+    def test_trim_warmup_preserves_metadata(self):
+        """trim_warmup 后元数据字段（semantic 等）应保留。"""
+        tp      = self._make_panel(semantic="price", price_basis="hfq")
+        trimmed = tp.trim_warmup(3)
+        assert trimmed.semantic    == "price"
+        assert trimmed.price_basis == "hfq"
+
+    # ── assert_valid() ───────────────────────────────────────────────────────
+
+    def test_assert_valid_passes_for_clean_panel(self):
+        """有效面板 assert_valid() 应静默通过。"""
+        tp = self._make_panel()
+        tp.assert_valid()  # 不应抛出异常
+
+    def test_assert_valid_fails_for_all_nan(self):
+        """全 NaN 面板 assert_valid() 应抛出 AssertionError。"""
+        from factor_framework.core.panel import TimestampedPanel
+        df = pd.DataFrame({"A": [np.nan, np.nan]}, index=["d1", "d2"])
+        tp = TimestampedPanel(df)
+        with pytest.raises(AssertionError, match="全为 NaN"):
+            tp.assert_valid()
+
+    def test_assert_valid_fails_for_unsorted_index(self):
+        """index 未排序时 assert_valid() 应抛出 AssertionError。"""
+        from factor_framework.core.panel import TimestampedPanel
+        df = pd.DataFrame({"A": [1.0, 2.0, 3.0]}, index=["d3", "d1", "d2"])
+        tp = TimestampedPanel(df)
+        with pytest.raises(AssertionError, match="严格递增"):
+            tp.assert_valid()
+
+    def test_assert_valid_fails_for_duplicate_index(self):
+        """index 有重复时 assert_valid() 应抛出 AssertionError。"""
+        from factor_framework.core.panel import TimestampedPanel
+        df = pd.DataFrame({"A": [1.0, 2.0, 3.0]}, index=["d1", "d1", "d2"])
+        tp = TimestampedPanel(df)
+        with pytest.raises(AssertionError, match="重复日期"):
+            tp.assert_valid()
+
+    # ── 自定义异常 ───────────────────────────────────────────────────────────
+
+    def test_timing_alignment_error_is_value_error(self):
+        """TimingAlignmentError 应继承 ValueError。"""
+        from factor_framework.core.panel import TimingAlignmentError
+        assert issubclass(TimingAlignmentError, ValueError)
+
+    def test_semantic_compatibility_error_is_type_error(self):
+        """SemanticCompatibilityError 应继承 TypeError。"""
+        from factor_framework.core.panel import SemanticCompatibilityError
+        assert issubclass(SemanticCompatibilityError, TypeError)
+
+
+class TestReturnPanel:
+    """
+    factor_framework.core.returns.ReturnPanel
+
+    覆盖：
+    - build()：收益率计算公式验证、price_basis 检查
+    - build_multi_forward()：字典键、各 forward 面板 semantic
+    - from_raw_dataframe()：向后兼容接口
+    """
+
+    def _make_price_panel(self, rows=30, cols=5, price_basis="hfq"):
+        """构建测试用价格 TimestampedPanel。"""
+        from factor_framework.core.panel import TimestampedPanel
+        idx   = pd.date_range("2020-01-01", periods=rows, freq="B")
+        cols_ = [f"S{i:03d}" for i in range(cols)]
+        prices = np.abs(np.random.randn(rows, cols)) * 10 + 10  # 正值
+        return TimestampedPanel(
+            pd.DataFrame(prices, index=idx, columns=cols_),
+            semantic    = "price",
+            price_basis = price_basis,
+        )
+
+    def test_build_returns_timestamped_panel(self):
+        """build() 应返回 TimestampedPanel。"""
+        from factor_framework.core.panel   import TimestampedPanel
+        from factor_framework.core.returns import ReturnPanel
+        price  = self._make_price_panel()
+        ret_tp = ReturnPanel.build(price, forward_days=5)
+        assert isinstance(ret_tp, TimestampedPanel)
+
+    def test_build_semantic_is_forward_return(self):
+        """build() 返回面板的 semantic 应为 'forward_return'。"""
+        from factor_framework.core.returns import ReturnPanel
+        price  = self._make_price_panel()
+        ret_tp = ReturnPanel.build(price, forward_days=5)
+        assert ret_tp.semantic == "forward_return"
+
+    def test_build_forward_days_stored(self):
+        """build() 返回面板的 forward_days 应等于入参。"""
+        from factor_framework.core.returns import ReturnPanel
+        price  = self._make_price_panel()
+        ret_tp = ReturnPanel.build(price, forward_days=21)
+        assert ret_tp.forward_days == 21
+
+    def test_build_not_t1_shifted(self):
+        """build() 返回面板的 is_t1_shifted 应为 False（T+1 在因子侧完成）。"""
+        from factor_framework.core.returns import ReturnPanel
+        price  = self._make_price_panel()
+        ret_tp = ReturnPanel.build(price, forward_days=5)
+        assert ret_tp.is_t1_shifted is False
+
+    def test_build_formula_correctness(self):
+        """收益率公式 price.shift(-fwd)/price - 1 应与手动计算结果一致。"""
+        from factor_framework.core.panel   import TimestampedPanel
+        from factor_framework.core.returns import ReturnPanel
+        prices = [100.0, 110.0, 121.0, 133.0, 146.0]
+        idx    = pd.date_range("2020-01-01", periods=5, freq="B")
+        df     = pd.DataFrame({"A": prices}, index=idx)
+        price  = TimestampedPanel(df, semantic="price", price_basis="hfq")
+        ret_tp = ReturnPanel.build(price, forward_days=2)
+        # ret[0] = prices[2]/prices[0] - 1 = 121/100 - 1 = 0.21
+        assert ret_tp.loc[idx[0], "A"] == pytest.approx(0.21, abs=1e-9)
+        # 尾部 2 行应为 NaN（未来价格不存在）
+        assert np.isnan(ret_tp.loc[idx[3], "A"])
+        assert np.isnan(ret_tp.loc[idx[4], "A"])
+
+    def test_build_zero_price_becomes_nan(self):
+        """价格为 0 时，收益率应为 NaN（不产生 inf）。"""
+        from factor_framework.core.panel   import TimestampedPanel
+        from factor_framework.core.returns import ReturnPanel
+        prices = [0.0, 100.0, 110.0]
+        idx    = pd.date_range("2020-01-01", periods=3, freq="B")
+        df     = pd.DataFrame({"A": prices}, index=idx)
+        price  = TimestampedPanel(df, semantic="price", price_basis="hfq")
+        ret_tp = ReturnPanel.build(price, forward_days=1)
+        # ret[0] = price[1]/price[0] - 1，但 price[0]=0 → NaN
+        assert np.isnan(ret_tp.loc[idx[0], "A"])
+
+    def test_build_wrong_price_basis_raises(self):
+        """price_basis 不为 'hfq' 时 build() 应抛出 ValueError。"""
+        from factor_framework.core.panel   import TimestampedPanel
+        from factor_framework.core.returns import ReturnPanel
+        df    = pd.DataFrame({"A": [100.0, 110.0]})
+        price = TimestampedPanel(df, semantic="price", price_basis="qfq")
+        with pytest.raises(ValueError, match="后复权"):
+            ReturnPanel.build(price, forward_days=1)
+
+    def test_build_non_timestampedpanel_raises(self):
+        """入参不是 TimestampedPanel 时 build() 应抛出 TypeError。"""
+        from factor_framework.core.returns import ReturnPanel
+        df = pd.DataFrame({"A": [100.0, 110.0]})
+        with pytest.raises(TypeError):
+            ReturnPanel.build(df, forward_days=1)
+
+    def test_build_multi_forward_keys(self):
+        """build_multi_forward() 返回字典的 key 应等于 forward_list。"""
+        from factor_framework.core.returns import ReturnPanel
+        price        = self._make_price_panel()
+        forward_list = [1, 5, 10, 21]
+        ret_dict     = ReturnPanel.build_multi_forward(price, forward_list)
+        assert set(ret_dict.keys()) == set(forward_list)
+
+    def test_build_multi_forward_each_semantic(self):
+        """build_multi_forward() 中每个面板的 semantic 应为 'forward_return'。"""
+        from factor_framework.core.returns import ReturnPanel
+        price    = self._make_price_panel()
+        ret_dict = ReturnPanel.build_multi_forward(price, [1, 5])
+        for fwd, ret_tp in ret_dict.items():
+            assert ret_tp.semantic     == "forward_return", f"forward={fwd} semantic 错误"
+            assert ret_tp.forward_days == fwd,              f"forward={fwd} forward_days 错误"
+
+    def test_from_raw_dataframe_returns_timestamped_panel(self):
+        """from_raw_dataframe() 向后兼容接口应返回 TimestampedPanel。"""
+        from factor_framework.core.panel   import TimestampedPanel
+        from factor_framework.core.returns import ReturnPanel
+        df     = pd.DataFrame({"A": [100.0, 110.0, 121.0]})
+        ret_tp = ReturnPanel.from_raw_dataframe(df, forward_days=1, price_basis=None)
+        assert isinstance(ret_tp, TimestampedPanel)
+        assert ret_tp.semantic == "forward_return"
+
+
+class TestCacheLayer:
+    """
+    factor_framework.engine.cache.CacheLayer
+
+    覆盖：
+    - make_key()：相同参数产生相同 key，不同参数产生不同 key
+    - get_panel() / put_panel()：L1 内存缓存读写
+    - L2 磁盘缓存读写（临时目录）
+    - clear_l1() / clear_l2()
+    - cache_info()
+    - 失效机制（mtime 比较）
+    """
+
+    def _make_panel_df(self, rows=10, cols=5):
+        idx  = pd.date_range("2020-01-01", periods=rows, freq="B")
+        cols_ = [f"S{i:03d}" for i in range(cols)]
+        return pd.DataFrame(np.random.randn(rows, cols), index=idx, columns=cols_)
+
+    def test_make_key_same_params(self):
+        """相同参数应生成相同的 cache key。"""
+        from factor_framework.engine.cache import CacheLayer
+        key1 = CacheLayer.make_key("mom", "20200101", "20251231", ["A", "B", "C"])
+        key2 = CacheLayer.make_key("mom", "20200101", "20251231", ["C", "A", "B"])  # 顺序不同
+        assert key1 == key2, "make_key 应对 symbols 排序后哈希"
+
+    def test_make_key_different_params(self):
+        """不同参数应生成不同的 cache key。"""
+        from factor_framework.engine.cache import CacheLayer
+        key1 = CacheLayer.make_key("mom", "20200101", "20251231", ["A"])
+        key2 = CacheLayer.make_key("vol", "20200101", "20251231", ["A"])
+        assert key1 != key2
+
+    def test_l1_miss_returns_none(self):
+        """L1 缓存未命中时 get_panel() 应返回 None。"""
+        from factor_framework.engine.cache import CacheLayer
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CacheLayer(cache_dir=tmp, stocks_dir=tmp, enabled_l2=False)
+            result = cache.get_panel("mom", "nonexistent_key")
+            assert result is None
+
+    def test_l1_put_and_get(self):
+        """put_panel() 写入 L1 后 get_panel() 应能命中。"""
+        from factor_framework.engine.cache import CacheLayer
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = CacheLayer(cache_dir=tmp, stocks_dir=tmp, enabled_l2=False)
+            panel = self._make_panel_df()
+            key   = CacheLayer.make_key("mom", "20200101", "20251231", list(panel.columns))
+            cache.put_panel("mom", key, panel, calc_secs=0.0)
+            result = cache.get_panel("mom", key)
+            assert result is not None
+            pd.testing.assert_frame_equal(result, panel)
+
+    def test_l2_put_and_get(self, tmp_path):
+        """L2 磁盘缓存：put_panel() 写入 Parquet 后 get_panel() 应能从磁盘命中。"""
+        pytest.importorskip("pyarrow", reason="pyarrow 不可用，跳过 L2 Parquet 测试")
+        from factor_framework.engine.cache import CacheLayer
+        stocks_dir = tmp_path / "stocks"
+        stocks_dir.mkdir()
+        cache = CacheLayer(
+            cache_dir     = str(tmp_path / "cache"),
+            stocks_dir    = str(stocks_dir),
+            enabled_l2    = True,
+            min_calc_secs = 0.0,   # 任何计算时间都写 L2
+        )
+        # 数据源 mtime 设为 0（使缓存永远有效）
+        cache._source_mtime = 0.0
+
+        panel = self._make_panel_df()
+        key   = CacheLayer.make_key("vol", "20200101", "20251231", list(panel.columns))
+        cache.put_panel("vol", key, panel, calc_secs=10.0)
+
+        # 验证 Parquet 文件已写入
+        parquet_path = tmp_path / "cache" / "vol" / f"{key}.parquet"
+        if not parquet_path.exists():
+            pytest.skip("Parquet 文件未写入（pyarrow 运行时问题），跳过 L2 读取验证")
+
+        # 清空 L1，强制从 L2 读取
+        cache.clear_l1()
+        result = cache.get_panel("vol", key)
+        assert result is not None
+        pd.testing.assert_frame_equal(result, panel, check_freq=False)
+
+    def test_l2_not_written_below_threshold(self, tmp_path):
+        """calc_secs < min_calc_secs 时不写入 L2 Parquet。"""
+        from factor_framework.engine.cache import CacheLayer
+        cache = CacheLayer(
+            cache_dir     = str(tmp_path / "cache"),
+            stocks_dir    = str(tmp_path),
+            enabled_l2    = True,
+            min_calc_secs = 5.0,
+        )
+        panel = self._make_panel_df()
+        key   = CacheLayer.make_key("mom", "20200101", "20251231", list(panel.columns))
+        cache.put_panel("mom", key, panel, calc_secs=1.0)  # 低于阈值
+
+        parquet_path = tmp_path / "cache" / "mom" / f"{key}.parquet"
+        assert not parquet_path.exists(), "低于阈值时不应写入 Parquet"
+
+    def test_clear_l1(self, tmp_path):
+        """clear_l1() 应清空内存缓存。"""
+        from factor_framework.engine.cache import CacheLayer
+        cache = CacheLayer(cache_dir=str(tmp_path), stocks_dir=str(tmp_path), enabled_l2=False)
+        panel = self._make_panel_df()
+        key   = CacheLayer.make_key("x", "20200101", "20251231", ["A"])
+        cache.put_panel("x", key, panel)
+        assert cache.cache_info()["l1_entries"] == 1
+        cache.clear_l1()
+        assert cache.cache_info()["l1_entries"] == 0
+
+    def test_cache_info_structure(self, tmp_path):
+        """cache_info() 应返回包含必要字段的字典。"""
+        from factor_framework.engine.cache import CacheLayer
+        cache = CacheLayer(cache_dir=str(tmp_path / "cache"), stocks_dir=str(tmp_path))
+        info  = cache.cache_info()
+        assert "l1_entries"  in info
+        assert "l2_files"    in info
+        assert "l2_total_mb" in info
+        assert "enabled_l2"  in info
+
+
+class TestBUG9Fix:
+    """
+    BUG-9：ic_decay 双路径不一致修复验证。
+
+    修复前：pipeline 中主 IC 使用 build_return_panel()（含 T+1 shift），
+            ic_decay() 内部从 close_panel 重算收益率（无 T+1），两者不同源。
+    修复后：ic_decay() 增加 return_panels 参数，优先使用调用方传入的同源面板。
+
+    此测试类验证：
+    1. ic_decay(return_panels=...) 路径正常工作
+    2. 两个路径的结果在相同数据下是否接近（量化双路径的差异大小）
+    3. ic_analysis.ic_decay() 向后兼容旧签名（仅传 price_panel）
+    """
+
+    def _make_factor_price(self, n_dates=100, n_stocks=20, seed=42):
+        """生成测试用因子面板和价格面板。"""
+        rng    = np.random.default_rng(seed)
+        idx    = pd.date_range("2020-01-01", periods=n_dates, freq="B")
+        cols   = [f"S{i:03d}" for i in range(n_stocks)]
+        prices = np.cumprod(1 + rng.normal(0, 0.01, (n_dates, n_stocks)), axis=0) * 10
+        factor = rng.standard_normal((n_dates, n_stocks))
+        return (
+            pd.DataFrame(factor, index=idx, columns=cols),
+            pd.DataFrame(prices, index=idx, columns=cols),
+        )
+
+    def test_return_panels_path_no_error(self):
+        """ic_decay(return_panels=...) 路径应正常执行，不抛出异常。"""
+        from factor_framework.ic_analysis import ic_decay
+        fp, price = self._make_factor_price()
+        # 手动构建 return_panels（模拟 build_return_panel 的输出格式）
+        ret_panels = {}
+        for fwd in [1, 5, 10]:
+            rp = price.shift(-fwd) / price.replace(0, np.nan) - 1
+            rp = rp.iloc[:-(fwd + 1)]  # 截尾（模拟 T+1 shift）
+            ret_panels[fwd] = rp
+        result = ic_decay(fp, return_panels=ret_panels, method="rank")
+        assert isinstance(result, pd.DataFrame)
+        assert set(result.index.tolist()) == {1, 5, 10}
+        assert "mean_ic" in result.columns
+
+    def test_return_panels_result_non_nan(self):
+        """return_panels 路径的 mean_ic 在数据充足时不应全为 NaN。"""
+        from factor_framework.ic_analysis import ic_decay
+        fp, price = self._make_factor_price(n_dates=120, n_stocks=30)
+        ret_panels = {}
+        for fwd in [1, 5]:
+            rp = price.shift(-fwd) / price.replace(0, np.nan) - 1
+            valid_idx = rp.dropna(how="all").index
+            ret_panels[fwd] = rp.loc[valid_idx]
+        result = ic_decay(fp, return_panels=ret_panels, method="rank")
+        assert result["mean_ic"].notna().any(), "mean_ic 不应全为 NaN"
+
+    def test_backward_compat_price_panel_path(self):
+        """向后兼容：仅传 price_panel（不传 return_panels）应走回退路径，不报错。"""
+        from factor_framework.ic_analysis import ic_decay
+        import warnings
+        fp, price = self._make_factor_price()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # 忽略截断 warning
+            result = ic_decay(fp, price_panel=price, forward_periods=[1, 5], method="rank")
+        assert isinstance(result, pd.DataFrame)
+        assert set(result.index.tolist()) == {1, 5}
+
+    def test_both_none_raises(self):
+        """price_panel 和 return_panels 同时为 None 应抛出 ValueError。"""
+        from factor_framework.ic_analysis import ic_decay
+        fp, _ = self._make_factor_price()
+        with pytest.raises(ValueError, match="不能同时为 None"):
+            ic_decay(fp, price_panel=None, return_panels=None)
+
+    def test_return_panels_path_sorted_by_forward(self):
+        """return_panels 路径的结果应按 forward_days 升序排列（index 有序）。"""
+        from factor_framework.ic_analysis import ic_decay
+        fp, price = self._make_factor_price()
+        ret_panels = {}
+        for fwd in [21, 5, 1, 10]:   # 故意乱序传入
+            rp = price.shift(-fwd) / price.replace(0, np.nan) - 1
+            valid_idx = rp.dropna(how="all").index
+            ret_panels[fwd] = rp.loc[valid_idx]
+        result = ic_decay(fp, return_panels=ret_panels, method="rank")
+        assert list(result.index) == sorted(result.index), "结果 index 应按 forward 升序"

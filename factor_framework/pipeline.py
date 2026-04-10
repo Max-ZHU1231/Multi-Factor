@@ -424,12 +424,24 @@ class FactorPipeline:
 
         # ── IC 衰减分析（在月度重采样前用日频面板执行）─────────────────────
         # BUG 12 FIX: ic_decay 必须在 resample_monthly 之前调用，否则月末索引与日频
-        # close_panel 的 intersection 几乎为空。
+        # 价格面板的 intersection 几乎为空。
+        # BUG 9 FIX: 为每个 ic_forward_list 中的 forward 构建收益率面板，
+        # 传入 ic_decay 的 return_panels 参数，消除双路径不一致问题。
+        # 注意：此处在日频面板上构建多个 forward 的收益率，与主 IC 路径同源。
         print(f"\n[4/6] IC 分析（method={ic_method}）...")
-        self.engine.register("__close__", lambda df: df["收盘价"])
-        close_panel = self.engine.build_panel("__close__", start=start, end=end, symbols=symbols)
-        del self.engine._registry["__close__"]
-        ic_decay_df = ic_decay(factor_panel, close_panel, forward_periods=ic_forward_list, method=ic_method)
+        ic_return_panels: Dict[int, pd.DataFrame] = {}
+        for _fwd in ic_forward_list:
+            _rp = self.engine.build_return_panel(
+                forward=_fwd, start=start, end=end, symbols=symbols
+            )
+            # 截断尾部全 NaN 行（forward+1 行因 T+1 shift 无效）
+            _valid_idx = _rp.dropna(how="all").index
+            ic_return_panels[_fwd] = _rp.loc[_valid_idx]
+        ic_decay_df = ic_decay(
+            factor_panel,
+            return_panels=ic_return_panels,
+            method=ic_method,
+        )
 
         # ── 月度重采样（可选，在截面预处理和 IC 衰减之后）──────────────────
         # BUG 13/15 NOTE: 月度重采样后 factor_panel/return_panel 为月末截面，
@@ -482,7 +494,7 @@ class FactorPipeline:
         self,
         factor_panels:    Dict[str, pd.DataFrame],
         return_panel:     pd.DataFrame,
-        close_panel:      pd.DataFrame,
+        close_panel:      Optional[pd.DataFrame] = None,
         forward:          int = 21,
         n_groups:         int = 5,
         direction:        int = 1,
@@ -495,6 +507,7 @@ class FactorPipeline:
         rf:               float = 0.0,
         cost_per_side:    float = 0.002,
         resample_monthly: bool = True,
+        ic_return_panels: Optional[Dict[int, pd.DataFrame]] = None,
     ) -> Dict[str, "FactorReport"]:
         """
         对已预构建的因子面板字典批量执行检验流程（无重复读盘）。
@@ -506,11 +519,14 @@ class FactorPipeline:
 
         Parameters
         ----------
-        factor_panels    : {factor_name: raw_factor_panel}（build_panel_batch 的输出）
-        return_panel     : 已构建的未来收益率面板（来自 build_return_panel，含 T+1 滞后）
-        close_panel      : 已构建的收盘价面板（用于 IC 衰减）
-        resample_monthly : True = 月度重采样（推荐，与 forward=21 月度换仓语义一致）
-        其余参数         : 同 run()
+        factor_panels     : {factor_name: raw_factor_panel}（build_panel_batch 的输出）
+        return_panel      : 已构建的主 forward 收益率面板（含 T+1 滞后）
+        close_panel       : （已废弃，保留向后兼容，传入会被忽略）
+                            BUG-9 修复后，IC 衰减使用 ic_return_panels，不再需要
+        ic_return_panels  : {forward_days: 收益率面板}，用于 IC 衰减分析（BUG-9 修复）
+                            若为 None，则在方法内部自动构建
+        resample_monthly  : True = 月度重采样（推荐，与 forward=21 月度换仓语义一致）
+        其余参数          : 同 run()
 
         Returns
         -------
@@ -525,6 +541,15 @@ class FactorPipeline:
                 f"全为 NaN，已同步截断所有因子面板对应行。"
             )
             return_panel = return_panel.loc[valid_ret_idx]
+
+        # ── BUG-9 修复：构建多 forward 收益率面板（所有因子共用，一次性构建）──
+        # 若调用方未传入 ic_return_panels，则从 engine 自动构建
+        if ic_return_panels is None:
+            ic_return_panels = {}
+            for _fwd in ic_forward_list:
+                _rp = self.engine.build_return_panel(forward=_fwd)
+                _valid_idx = _rp.dropna(how="all").index
+                ic_return_panels[_fwd] = _rp.loc[_valid_idx]
 
         reports: Dict[str, FactorReport] = {}
         total = len(factor_panels)
@@ -565,9 +590,11 @@ class FactorPipeline:
 
                 # ── IC 衰减分析（在月度重采样前用日频面板执行）──────────────
                 # BUG 12 FIX: ic_decay 必须在 resample_monthly 之前调用
+                # BUG 9  FIX: 使用 ic_return_panels（与主 IC 同源），消除双路径
                 ic_decay_df = ic_decay(
-                    factor_panel, close_panel,
-                    forward_periods=ic_forward_list, method=ic_method,
+                    factor_panel,
+                    return_panels=ic_return_panels,
+                    method=ic_method,
                 )
 
                 # ── 月度重采样（在截面预处理和 IC 衰减之后）────────────────
@@ -783,12 +810,19 @@ class FactorPipeline:
         ic_s      = ic_stats(ic_series, annualize_periods=periods_per_year)
         ic_nw     = ic_significance(ic_series, lags=max(1, int(len(ic_series) ** 0.25)))
 
-        # IC 衰减
-        self.engine.register("__close__", lambda df: df["收盘价"])
-        close_panel = self.engine.build_panel("__close__", start=start, end=end, symbols=symbols)
-        del self.engine._registry["__close__"]
-        ic_decay_df = ic_decay(composite_panel, close_panel,
-                               forward_periods=ic_forward_list, method=ic_method)
+        # IC 衰减（BUG-9 修复：使用同源多 forward 收益率面板，不从 close_panel 重算）
+        ic_ret_panels_composite: Dict[int, pd.DataFrame] = {}
+        for _fwd in ic_forward_list:
+            _rp = self.engine.build_return_panel(
+                forward=_fwd, start=start, end=end, symbols=symbols
+            )
+            _valid_idx = _rp.dropna(how="all").index
+            ic_ret_panels_composite[_fwd] = _rp.loc[_valid_idx]
+        ic_decay_df = ic_decay(
+            composite_panel,
+            return_panels=ic_ret_panels_composite,
+            method=ic_method,
+        )
 
         # ── Step 6：分层回测 ──────────────────────────────────────────────
         print(f"分层回测（n_groups={n_groups}）...")
