@@ -5375,3 +5375,324 @@ class TestPanelBuilder:
             verbose     = False,
         )
         assert isinstance(pipe.engine, FactorEngine)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TestTransformPipeline  (Phase 3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestTransformPipeline:
+    """TransformPipeline 的单元测试。"""
+
+    @staticmethod
+    def _make_panel(n_rows: int = 20, n_cols: int = 30, seed: int = 0):
+        rng = np.random.default_rng(seed)
+        dates = pd.date_range("20200101", periods=n_rows, freq="B").strftime("%Y%m%d")
+        cols  = [f"S{i:04d}" for i in range(n_cols)]
+        return pd.DataFrame(rng.standard_normal((n_rows, n_cols)), index=dates, columns=cols)
+
+    def test_import(self):
+        """TransformPipeline 可以正常导入。"""
+        from factor_framework.factors.transform import TransformPipeline  # noqa
+        assert TransformPipeline is not None
+
+    def test_empty_pipeline_passthrough(self):
+        """空管道 transform 应返回与输入形状相同的 DataFrame。"""
+        from factor_framework.factors.transform import TransformPipeline
+        panel = self._make_panel()
+        tp = TransformPipeline()
+        out = tp.transform(panel)
+        assert out.shape == panel.shape
+
+    def test_step_names_empty(self):
+        """空管道的 step_names 应为空列表。"""
+        from factor_framework.factors.transform import TransformPipeline
+        tp = TransformPipeline()
+        assert tp.step_names == []
+
+    def test_len_empty(self):
+        """空管道 len() 应为 0。"""
+        from factor_framework.factors.transform import TransformPipeline
+        tp = TransformPipeline()
+        assert len(tp) == 0
+
+    def test_repr_contains_class_name(self):
+        """__repr__ 应包含类名。"""
+        from factor_framework.factors.transform import TransformPipeline
+        tp = TransformPipeline()
+        assert "TransformPipeline" in repr(tp)
+
+    def test_winsorize_reduces_extremes(self):
+        """winsorize 步骤应截断极端值（极值应变小或相等）。"""
+        from factor_framework.factors.transform import TransformPipeline
+        rng = np.random.default_rng(42)
+        panel = self._make_panel(20, 50, seed=42)
+        # 注入几个极端值
+        panel.iloc[0, 0] = 1000.0
+        panel.iloc[1, 1] = -1000.0
+        tp = TransformPipeline().winsorize(n_std=3.0)
+        out = tp.transform(panel)
+        assert float(out.iloc[0, 0]) < 1000.0
+        assert float(out.iloc[1, 1]) > -1000.0
+
+    def test_winsorize_step_registered(self):
+        """winsorize 后 step_names 应包含 'winsorize'。"""
+        from factor_framework.factors.transform import TransformPipeline
+        tp = TransformPipeline().winsorize()
+        assert "winsorize" in tp.step_names
+
+    def test_standardize_rank_range(self):
+        """standardize('rank') 的输出应在 [0, 1] 范围内（每行均值 ≈ 0.5）。"""
+        from factor_framework.factors.transform import TransformPipeline
+        panel = self._make_panel(10, 40)
+        tp = TransformPipeline().standardize("rank")
+        out = tp.transform(panel)
+        # 每行丢弃 NaN 后的值域
+        assert float(out.stack().min()) >= -1e-9
+        assert float(out.stack().max()) <= 1.0 + 1e-9
+
+    def test_standardize_zscore_mean(self):
+        """standardize('zscore') 的每行均值应接近 0。"""
+        from factor_framework.factors.transform import TransformPipeline
+        panel = self._make_panel(10, 60)
+        tp = TransformPipeline().standardize("zscore")
+        out = tp.transform(panel)
+        row_means = out.mean(axis=1).dropna()
+        assert float(row_means.abs().max()) < 1e-9
+
+    def test_register_custom_step(self):
+        """register_step 注册的自定义步骤应被执行。"""
+        from factor_framework.factors.transform import TransformPipeline
+        panel = self._make_panel()
+        called = []
+        def mark(p):
+            called.append(True)
+            return p
+        tp = TransformPipeline().register_step("marker", mark)
+        tp.transform(panel)
+        assert called
+
+    def test_step_names_order(self):
+        """step_names 应保持注册顺序。"""
+        from factor_framework.factors.transform import TransformPipeline
+        tp = (TransformPipeline()
+              .winsorize()
+              .standardize("rank"))
+        assert tp.step_names == ["winsorize", "standardize"]
+
+    def test_len_after_steps(self):
+        """注册两步后 len() 应为 2。"""
+        from factor_framework.factors.transform import TransformPipeline
+        tp = TransformPipeline().winsorize().standardize()
+        assert len(tp) == 2
+
+    def test_fluent_chaining_returns_self(self):
+        """winsorize/standardize/register_step 应都返回 self（支持链式）。"""
+        from factor_framework.factors.transform import TransformPipeline
+        tp = TransformPipeline()
+        r1 = tp.winsorize()
+        r2 = r1.standardize()
+        r3 = r2.register_step("noop", lambda p: p)
+        assert r1 is tp
+        assert r2 is tp
+        assert r3 is tp
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TestICAnalyzer  (Phase 3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestICAnalyzer:
+    """ICAnalyzer 的单元测试。"""
+
+    @staticmethod
+    def _make_panels(n_rows: int = 30, n_cols: int = 50, seed: int = 7):
+        rng = np.random.default_rng(seed)
+        dates = pd.date_range("20200101", periods=n_rows, freq="B").strftime("%Y%m%d")
+        cols  = [f"S{i:04d}" for i in range(n_cols)]
+        fp = pd.DataFrame(rng.standard_normal((n_rows, n_cols)), index=dates, columns=cols)
+        rp = pd.DataFrame(rng.standard_normal((n_rows, n_cols)), index=dates, columns=cols)
+        return fp, rp
+
+    def test_import(self):
+        """ICAnalyzer 可正常导入。"""
+        from factor_framework.factors.ic_analyzer import ICAnalyzer  # noqa
+        assert ICAnalyzer is not None
+
+    def test_run_before_access_raises(self):
+        """run() 前访问 ic_series 应抛出 RuntimeError。"""
+        from factor_framework.factors.ic_analyzer import ICAnalyzer
+        fp, rp = self._make_panels()
+        az = ICAnalyzer(fp, rp)
+        with pytest.raises(RuntimeError):
+            _ = az.ic_series
+
+    def test_run_returns_self(self):
+        """run() 应返回 self（支持链式）。"""
+        from factor_framework.factors.ic_analyzer import ICAnalyzer
+        fp, rp = self._make_panels()
+        az = ICAnalyzer(fp, rp)
+        assert az.run() is az
+
+    def test_ic_series_not_empty(self):
+        """run() 后 ic_series 应为非空 pd.Series。"""
+        from factor_framework.factors.ic_analyzer import ICAnalyzer
+        fp, rp = self._make_panels()
+        az = ICAnalyzer(fp, rp).run()
+        assert isinstance(az.ic_series, pd.Series)
+        assert len(az.ic_series) > 0
+
+    def test_ic_stats_dict_keys(self):
+        """ic_stats_dict 应包含必需字段。"""
+        from factor_framework.factors.ic_analyzer import ICAnalyzer
+        fp, rp = self._make_panels()
+        az = ICAnalyzer(fp, rp).run()
+        for key in ("mean_ic", "std_ic", "icir", "win_rate"):
+            assert key in az.ic_stats_dict, f"缺少字段: {key}"
+
+    def test_ic_nw_keys(self):
+        """ic_nw 应包含 nw_t_stat 和 nw_p_value。"""
+        from factor_framework.factors.ic_analyzer import ICAnalyzer
+        fp, rp = self._make_panels()
+        az = ICAnalyzer(fp, rp).run()
+        assert "nw_t_stat" in az.ic_nw
+        assert "nw_p_value" in az.ic_nw
+
+    def test_decay_df_none_without_return_panels(self):
+        """不传 return_panels 时，decay_df 应为 None 或空。"""
+        from factor_framework.factors.ic_analyzer import ICAnalyzer
+        fp, rp = self._make_panels()
+        az = ICAnalyzer(fp, rp).run()
+        # decay_df 可为 None 或行数为 0 的 DataFrame
+        if az.decay_df is not None:
+            assert len(az.decay_df) == 0 or az.decay_df.empty
+
+    def test_decay_df_with_return_panels(self):
+        """传入 return_panels 后，decay_df 应为非空 DataFrame。"""
+        from factor_framework.factors.ic_analyzer import ICAnalyzer
+        fp, rp = self._make_panels()
+        rps = {1: rp, 5: rp}
+        az = ICAnalyzer(fp, rp, return_panels=rps).run()
+        assert az.decay_df is not None
+        assert len(az.decay_df) > 0
+
+    def test_summary_is_dict(self):
+        """summary() 应返回 dict。"""
+        from factor_framework.factors.ic_analyzer import ICAnalyzer
+        fp, rp = self._make_panels()
+        s = ICAnalyzer(fp, rp).run().summary()
+        assert isinstance(s, dict)
+
+    def test_print_summary_no_error(self, capsys):
+        """print_summary() 不应抛出异常，且应输出 IC 相关内容。"""
+        from factor_framework.factors.ic_analyzer import ICAnalyzer
+        fp, rp = self._make_panels()
+        ICAnalyzer(fp, rp).run().print_summary("test_factor")
+        captured = capsys.readouterr()
+        assert "IC" in captured.out or "ic" in captured.out.lower()
+
+    def test_repr_shows_status(self):
+        """__repr__ 应包含状态信息。"""
+        from factor_framework.factors.ic_analyzer import ICAnalyzer
+        fp, rp = self._make_panels()
+        az = ICAnalyzer(fp, rp)
+        r = repr(az)
+        assert "ICAnalyzer" in r
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TestLayerBacktester  (Phase 3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestLayerBacktester:
+    """LayerBacktester 的单元测试。"""
+
+    @staticmethod
+    def _make_panels(n_rows: int = 30, n_cols: int = 50, seed: int = 13):
+        rng = np.random.default_rng(seed)
+        dates = pd.date_range("20200101", periods=n_rows, freq="B").strftime("%Y%m%d")
+        cols  = [f"S{i:04d}" for i in range(n_cols)]
+        fp = pd.DataFrame(rng.standard_normal((n_rows, n_cols)), index=dates, columns=cols)
+        # 收益率应该很小（模拟真实价格变动）
+        rp = pd.DataFrame(rng.normal(0.001, 0.02, (n_rows, n_cols)), index=dates, columns=cols)
+        return fp, rp
+
+    def test_import(self):
+        """LayerBacktester 可正常导入。"""
+        from factor_framework.factors.layer_backtester import LayerBacktester  # noqa
+        assert LayerBacktester is not None
+
+    def test_run_before_access_raises(self):
+        """run() 前访问 layer_ret 应抛出 RuntimeError。"""
+        from factor_framework.factors.layer_backtester import LayerBacktester
+        fp, rp = self._make_panels()
+        bt = LayerBacktester(fp, rp)
+        with pytest.raises(RuntimeError):
+            _ = bt.layer_ret
+
+    def test_run_returns_self(self):
+        """run() 应返回 self（支持链式）。"""
+        from factor_framework.factors.layer_backtester import LayerBacktester
+        fp, rp = self._make_panels()
+        bt = LayerBacktester(fp, rp)
+        assert bt.run() is bt
+
+    def test_layer_ret_column_count(self):
+        """layer_ret 的列数应等于 n_groups + 1（含多空列 LS）。"""
+        from factor_framework.factors.layer_backtester import LayerBacktester
+        fp, rp = self._make_panels()
+        n_groups = 5
+        bt = LayerBacktester(fp, rp, n_groups=n_groups).run()
+        # layer_backtest 返回 n_groups 个分组 + 1 个多空列（LS）
+        assert bt.layer_ret.shape[1] == n_groups + 1
+
+    def test_ls_stats_is_dict(self):
+        """ls_stats 应为 dict，且包含 ls_annual_return。"""
+        from factor_framework.factors.layer_backtester import LayerBacktester
+        fp, rp = self._make_panels()
+        bt = LayerBacktester(fp, rp).run()
+        assert isinstance(bt.ls_stats, dict)
+        assert "ls_annual_return" in bt.ls_stats
+
+    def test_turnover_is_dict(self):
+        """turnover 应为 dict，且包含 avg_turnover。"""
+        from factor_framework.factors.layer_backtester import LayerBacktester
+        fp, rp = self._make_panels()
+        bt = LayerBacktester(fp, rp).run()
+        assert isinstance(bt.turnover, dict)
+        assert "avg_turnover" in bt.turnover
+
+    def test_nav_starts_near_one(self):
+        """nav 的首个非 NaN 值应接近 1.0（净值从 1 开始）。"""
+        from factor_framework.factors.layer_backtester import LayerBacktester
+        fp, rp = self._make_panels()
+        bt = LayerBacktester(fp, rp).run()
+        nav = bt.nav
+        if isinstance(nav, pd.Series):
+            first_val = nav.dropna().iloc[0]
+        else:
+            first_val = nav.dropna().iloc[0, 0]
+        assert abs(float(first_val) - 1.0) < 0.1
+
+    def test_summary_contains_required_keys(self):
+        """summary() 应包含 ls_annual_return 和 avg_turnover。"""
+        from factor_framework.factors.layer_backtester import LayerBacktester
+        fp, rp = self._make_panels()
+        s = LayerBacktester(fp, rp).run().summary()
+        assert isinstance(s, dict)
+        assert "ls_annual_return" in s
+        assert "avg_turnover" in s
+
+    def test_print_summary_no_error(self, capsys):
+        """print_summary() 不应抛出异常，且应输出内容。"""
+        from factor_framework.factors.layer_backtester import LayerBacktester
+        fp, rp = self._make_panels()
+        LayerBacktester(fp, rp).run().print_summary("test_factor")
+        captured = capsys.readouterr()
+        assert len(captured.out) > 0
+
+    def test_repr_contains_class_name(self):
+        """__repr__ 应包含 LayerBacktester。"""
+        from factor_framework.factors.layer_backtester import LayerBacktester
+        fp, rp = self._make_panels()
+        assert "LayerBacktester" in repr(LayerBacktester(fp, rp))

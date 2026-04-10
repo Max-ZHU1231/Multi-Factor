@@ -1,0 +1,41 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name        = "multi-factor"
+version     = "3.2.0"
+description = "A-share multi-factor research framework (Phase 3)"
+readme      = "README.md"
+license     = { text = "MIT" }
+requires-python = ">=3.10"
+
+dependencies = [
+    "pandas>=2.0",
+    "numpy",
+    "scipy",
+    "pyarrow",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-xdist",
+]
+
+[project.scripts]
+run-analysis = "scripts.run_analysis:main"
+run-batch    = "scripts.run_batch:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["factor_framework*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = [
+    "test_factor_framework.py",
+    "test_lookahead_bias.py",
+    "validation/",
+]
+addopts   = "-q --tb=short"
