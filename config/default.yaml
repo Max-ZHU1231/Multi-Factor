@@ -11,7 +11,7 @@
 
 # ── 数据路径 ────────────────────────────────────────────────────────────────
 data:
-  stocks_dir:  "stocks/stocks/"          # 股票日频 CSV 目录
+  stocks_dir:  "Stocks/"                   # 股票日频 CSV 目录
   stock_basic: "股票列表-stock_basic.csv"  # 股票基本信息
 
 # ── 缓存 ────────────────────────────────────────────────────────────────────
@@ -26,8 +26,8 @@ backtest:
   forward:          21          # 预测期（交易日）
   n_groups:         5           # 分层数
   direction:        1           # 因子方向：+1 越大越好，-1 越小越好
-  periods_per_year: 252         # 年化期数（日频=252，月频=12）
-  rf:               0.0         # 无风险利率（年化）
+  periods_per_year: 12          # 年化期数（月度重采样后用 12）
+  rf:               0.02        # 无风险利率（年化）
   cost_per_side:    0.002       # 单边交易成本
   resample_monthly: true        # true=月末重采样（推荐），false=保留日频
 
@@ -49,6 +49,6 @@ parallel:
 
 # ── 输出 ────────────────────────────────────────────────────────────────────
 output:
-  base_dir:       "output"                  # 输出根目录
-  factor_analysis: "output/factor_analysis" # 单因子分析输出
-  batch:           "output/batch_results"   # 批量回测输出
+  base_dir:       "artifacts"                        # 输出根目录
+  factor_analysis: "artifacts/factor_analysis"       # 单因子分析输出
+  batch:           "artifacts/batch_results"         # 批量回测输出

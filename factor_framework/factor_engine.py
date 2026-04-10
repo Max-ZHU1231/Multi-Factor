@@ -887,30 +887,52 @@ class FactorEngine:
         走全面板向量化快速路径（无 Python 循环，10–50x 加速）；
         其他算子或有 industry 参数时降级到 panel.apply(axis=1) / iterrows。
         """
-        # ── 快速路径 1：cs_rank → DataFrame.rank(axis=1) ────────────────────
+        # ── 快速路径 1：cs_rank → DataFrame.rank(axis=1)（分块以节约内存）──
         func_name = getattr(cs_func, "__name__", "")
         if industry is None and func_name == "cs_rank":
-            return panel.rank(axis=1, pct=True, na_option="keep")
+            CHUNK = 300
+            if len(panel) <= CHUNK:
+                return panel.rank(axis=1, pct=True, na_option="keep")
+            # 分块排名，避免一次性为超大面板分配内存
+            chunks = []
+            for start in range(0, len(panel), CHUNK):
+                block = panel.iloc[start:start+CHUNK]
+                chunks.append(block.rank(axis=1, pct=True, na_option="keep"))
+            return pd.concat(chunks)
 
         # ── 快速路径 2：cs_zscore → 逐行 (x-mean)/std（纯 numpy，无循环）──
         if industry is None and func_name == "cs_zscore":
             arr   = panel.values.astype(float)
-            mu    = np.nanmean(arr, axis=1, keepdims=True)
-            sigma = np.nanstd(arr, axis=1, ddof=1, keepdims=True)
-            with np.errstate(invalid="ignore", divide="ignore"):
-                out = np.where(sigma == 0, np.nan, (arr - mu) / sigma)
-            out[np.isnan(arr)] = np.nan
+            CHUNK = 200
+            T = arr.shape[0]
+            out = np.empty_like(arr)
+            for start in range(0, T, CHUNK):
+                block = arr[start:start+CHUNK]
+                mu    = np.nanmean(block, axis=1, keepdims=True)
+                sigma = np.nanstd(block, axis=1, ddof=1, keepdims=True)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    out[start:start+CHUNK] = np.where(sigma == 0, np.nan, (block - mu) / sigma)
+                out[start:start+CHUNK][np.isnan(block)] = np.nan
             return pd.DataFrame(out, index=panel.index, columns=panel.columns)
 
         # ── 快速路径 3：cs_winsorize → 逐行 MAD clip（纯 numpy，无循环）───
         if industry is None and func_name == "cs_winsorize":
             arr   = panel.values.astype(float)
             n_std = 3.0  # cs_winsorize 默认值
-            with np.errstate(invalid="ignore"):
-                med   = np.nanmedian(arr, axis=1, keepdims=True)          # (T,1)
-                mad   = np.nanmedian(np.abs(arr - med), axis=1, keepdims=True)  # (T,1)
-            lower = med - n_std * mad
-            upper = med + n_std * mad
+            # 分块计算 nanmedian，避免一次性为超大矩阵分配内存
+            CHUNK = 200  # 每次处理 200 行
+            T = arr.shape[0]
+            med_arr = np.empty((T, 1), dtype=float)
+            mad_arr = np.empty((T, 1), dtype=float)
+            for start in range(0, T, CHUNK):
+                block = arr[start:start+CHUNK]  # (chunk, N)
+                with np.errstate(invalid="ignore"):
+                    med_block = np.nanmedian(block, axis=1, keepdims=True)
+                    mad_block = np.nanmedian(np.abs(block - med_block), axis=1, keepdims=True)
+                med_arr[start:start+CHUNK] = med_block
+                mad_arr[start:start+CHUNK] = mad_block
+            lower = med_arr - n_std * mad_arr
+            upper = med_arr + n_std * mad_arr
             with np.errstate(invalid="ignore"):
                 out = np.clip(arr, lower, upper)
             out[np.isnan(arr)] = np.nan

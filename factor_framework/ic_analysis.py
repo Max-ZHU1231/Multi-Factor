@@ -74,9 +74,16 @@ def compute_ic(
     r = r.where(~nan_mask)
 
     if method == "rank":
-        # 横截面排名（忽略 NaN，每行独立排名）
-        f = f.rank(axis=1, na_option="keep")
-        r = r.rank(axis=1, na_option="keep")
+        # 横截面排名（分块处理，避免大面板一次性内存分配）
+        CHUNK = 300
+        if len(f) > CHUNK:
+            f = pd.concat([f.iloc[s:s+CHUNK].rank(axis=1, na_option="keep")
+                           for s in range(0, len(f), CHUNK)])
+            r = pd.concat([r.iloc[s:s+CHUNK].rank(axis=1, na_option="keep")
+                           for s in range(0, len(r), CHUNK)])
+        else:
+            f = f.rank(axis=1, na_option="keep")
+            r = r.rank(axis=1, na_option="keep")
 
     # ── 向量化 Pearson 相关（逐行）──────────────────────────────────────────
     # 每行去均值（仅用有效值的均值，NaN 不参与）
@@ -252,6 +259,9 @@ def ic_decay(
     # ── 优先路径：使用调用方传入的收益率面板（BUG-9 修复）─────────────────
     if return_panels is not None:
         rows = []
+        # 优化：对因子面板只做一次截面排名，复用到所有预测期
+        _f_ranked_cache: dict = {}   # valid_ret_rows.tobytes() -> ranked factor panel
+
         for fwd, ret_panel in sorted(return_panels.items()):
             # 取公共日期对齐
             common_idx = factor_panel.index.intersection(ret_panel.index)
@@ -270,8 +280,41 @@ def ic_decay(
             fp = factor_panel.loc[valid_ret_rows]
             rp = ret_panel.loc[valid_ret_rows]
 
-            ic_series = compute_ic(fp, rp, method=method)
-            st        = ic_stats(ic_series)
+            # 如果是 rank IC，预先计算排名因子面板（每组 valid_ret_rows 只算一次）
+            if method == "rank":
+                cache_key = id(valid_ret_rows) if len(valid_ret_rows) == len(factor_panel) else len(valid_ret_rows)
+                if cache_key not in _f_ranked_cache:
+                    common_stocks = fp.columns.intersection(rp.columns)
+                    fp_aligned = fp[common_stocks].astype(float)
+                    _f_ranked_cache[cache_key] = (
+                        fp_aligned.rank(axis=1, na_option="keep"),
+                        common_stocks,
+                    )
+                f_ranked, common_stocks = _f_ranked_cache[cache_key]
+                # 对齐 rp 到相同股票集
+                rp_aligned = rp[common_stocks].astype(float)
+                # 直接计算 rank IC（r 单独排名，f 已排名）
+                nan_mask = f_ranked.isna() | rp_aligned.isna()
+                f_clean  = f_ranked.where(~nan_mask)
+                r_ranked = rp_aligned.rank(axis=1, na_option="keep").where(~nan_mask)
+                f_mean   = f_clean.mean(axis=1)
+                r_mean   = r_ranked.mean(axis=1)
+                f_dm     = f_clean.sub(f_mean, axis=0)
+                r_dm     = r_ranked.sub(r_mean, axis=0)
+                num      = f_dm.mul(r_dm).sum(axis=1, skipna=True)
+                denom    = np.sqrt(
+                    f_dm.pow(2).sum(axis=1, skipna=True) *
+                    r_dm.pow(2).sum(axis=1, skipna=True)
+                )
+                denom    = denom.replace(0, np.nan)
+                ic_series = (num / denom)
+                ic_series.name = "IC"
+                # 清理临时变量释放内存
+                del f_clean, r_ranked, f_dm, r_dm, nan_mask
+            else:
+                ic_series = compute_ic(fp, rp, method=method)
+
+            st = ic_stats(ic_series)
             rows.append({
                 "forward":  fwd,
                 "mean_ic":  st["mean_ic"],
@@ -280,6 +323,9 @@ def ic_decay(
                 "win_rate": st["win_rate"],
                 "t_stat":   st["t_stat"],
             })
+            # 释放内存
+            del fp, rp, ic_series
+        del _f_ranked_cache
         return pd.DataFrame(rows).set_index("forward")
 
     # ── 回退路径：从 price_panel 重算收益率（向后兼容）────────────────────
