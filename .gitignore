@@ -206,9 +206,22 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-#  ��Ŀר�� 
+#  项目专用
 stocks/
 fundamentals/
 *.log
 desktop.ini
 Thumbs.db
+
+# 临时输出文件（请移到 artifacts/ 目录）
+dag_test*.txt
+dag_fail*.txt
+*_output.txt
+full_test.txt
+test_cache.parquet
+
+# artifacts 目录（本地生成产物，不入库）
+artifacts/
+
+# cache 目录（L2 Parquet 缓存）
+cache/

@@ -1,0 +1,54 @@
+# config/default.yaml
+# =====================
+# Multi-Factor Framework — 全局默认配置
+#
+# 优先级（从高到低）:
+#   1. CLI 参数 (--start, --forward, …)
+#   2. 用户配置文件 (--config my_config.yaml)
+#   3. 本文件 (default.yaml)
+#
+# 修改本文件即可改变所有分析脚本的默认行为，无需改代码。
+
+# ── 数据路径 ────────────────────────────────────────────────────────────────
+data:
+  stocks_dir:  "stocks/stocks/"          # 股票日频 CSV 目录
+  stock_basic: "股票列表-stock_basic.csv"  # 股票基本信息
+
+# ── 缓存 ────────────────────────────────────────────────────────────────────
+cache:
+  cache_dir:     "cache/"   # L2 Parquet 缓存目录（null = 禁用 L2）
+  min_calc_secs: 5.0        # 仅计算超过此秒数的面板才写入 L2
+
+# ── 回测参数 ────────────────────────────────────────────────────────────────
+backtest:
+  start:            "20200101"  # 回测开始日期
+  end:              "20251231"  # 回测结束日期
+  forward:          21          # 预测期（交易日）
+  n_groups:         5           # 分层数
+  direction:        1           # 因子方向：+1 越大越好，-1 越小越好
+  periods_per_year: 252         # 年化期数（日频=252，月频=12）
+  rf:               0.0         # 无风险利率（年化）
+  cost_per_side:    0.002       # 单边交易成本
+  resample_monthly: true        # true=月末重采样（推荐），false=保留日频
+
+# ── 预处理参数 ──────────────────────────────────────────────────────────────
+preprocess:
+  winsorize:   true    # 截面 MAD Winsorize
+  standardize: "rank"  # 横截面标准化：rank / zscore / null
+  neutralize:  false   # 市值+行业中性化
+
+# ── IC 分析 ─────────────────────────────────────────────────────────────────
+ic:
+  method:        "rank"            # rank / normal
+  forward_list:  [1, 5, 10, 21, 60]  # IC 衰减分析的预测期列表
+
+# ── 并行 ────────────────────────────────────────────────────────────────────
+parallel:
+  n_jobs:  8         # 并行线程数
+  verbose: true      # 显示进度条
+
+# ── 输出 ────────────────────────────────────────────────────────────────────
+output:
+  base_dir:       "output"                  # 输出根目录
+  factor_analysis: "output/factor_analysis" # 单因子分析输出
+  batch:           "output/batch_results"   # 批量回测输出

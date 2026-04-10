@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name        = "multi-factor"
-version     = "3.2.0"
+version     = "3.3.0"
 description = "A-share multi-factor research framework (Phase 3)"
 readme      = "README.md"
 license     = { text = "MIT" }
@@ -16,6 +16,7 @@ dependencies = [
     "scipy",
     "pyarrow",
     "tqdm",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
@@ -30,12 +31,11 @@ run-batch    = "scripts.run_batch:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["factor_framework*", "scripts*"]
+include = ["factor_framework*", "scripts*", "config*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = [
-    "test_factor_framework.py",
-    "test_lookahead_bias.py",
+    "tests/",
     "validation/",
 ]
 addopts   = "-q --tb=short"

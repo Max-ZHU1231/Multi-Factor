@@ -1,6 +1,15 @@
 """
 factor_analysis.py
 ==================
+.. deprecated:: v3.3
+    直接运行 ``factor_analysis.py`` 是旧路径。
+    新主路径为 ``scripts/run_analysis.py``，支持 YAML 配置与 CLI 参数覆盖：
+
+        python scripts/run_analysis.py [--config config/default.yaml] [--forward 21]
+
+    ``factor_analysis.py`` 保留为向后兼容层，内部逻辑不变。
+    v4.0 计划移除此入口，请尽快迁移到 ``scripts/run_analysis.py``。
+
 对因子库中全部内置因子进行系统性分析：
 
 (1) 单因子 IC 时序分析        —— 逐期 IC 折线 + 累积 IC 曲线
@@ -9,10 +18,14 @@ factor_analysis.py
 (4) 因子间截面相关性检验      —— 平均截面相关矩阵热力图
 (5) 因子间聚类分析            —— 层次聚类树状图 + 聚类热力图
 
-运行方式
+运行方式（旧入口，不推荐）
 --------
 cd "d:\\OneDrive - HKUST Connect\\桌面\\Multi Factor"
 .venv\\Scripts\\python.exe factor_analysis.py
+
+推荐方式（新主路径）
+--------
+.venv\\Scripts\\python.exe scripts/run_analysis.py
 
 输出
 ----
@@ -724,4 +737,14 @@ def main():
 
 
 if __name__ == "__main__":
+    import warnings as _w
+    _w.warn(
+        "\n\n"
+        "  ⚠️  factor_analysis.py 是旧入口（v3.3+ 已废弃）。\n"
+        "  新主路径：python scripts/run_analysis.py\n"
+        "  支持 YAML 配置与 CLI 参数，推荐尽快迁移。\n"
+        "  v4.0 将移除此文件的直接运行支持。\n",
+        DeprecationWarning,
+        stacklevel=1,
+    )
     main()

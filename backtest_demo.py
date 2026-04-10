@@ -7,6 +7,16 @@ backtest_demo.py
 因子 2: vol_20d        —— 20 日波动率（低波动异象，负向信号）
 因子 3: value_pb       —— 价值因子（1/市净率）
 
+.. deprecated:: v3.3
+    直接运行 ``backtest_demo.py`` 是旧入口。
+    新主路径：
+
+    .. code-block:: bash
+
+        python scripts/run_batch.py --start 20200101 --end 20251231
+
+    本文件作为学习示例保留，生产脚本请迁移到 ``scripts/run_batch.py``。
+
 流程（v2.9 批量流水线，一次读盘，共享缓存）：
   1. build_panel_batch  → 三因子面板一次性构建
   2. build_return_panel → 月度收益率面板（forward=21 天）
@@ -30,6 +40,17 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 warnings.filterwarnings("ignore")
+
+# ── 旧入口弃用警告（v3.3+）────────────────────────────────────────────────────
+warnings.warn(
+    "\n\n"
+    "  ⚠️  backtest_demo.py 是旧演示入口（v3.3+ 已废弃）。\n"
+    "  新主路径：python scripts/run_batch.py\n"
+    "  配置文件：config/default.yaml\n"
+    "  本文件将在 v4.0 移除。\n",
+    DeprecationWarning,
+    stacklevel=1,
+)
 
 # 中文字体（Windows 环境）
 matplotlib.rcParams["font.family"]        = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]

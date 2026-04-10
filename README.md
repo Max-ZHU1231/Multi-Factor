@@ -1,6 +1,6 @@
 # Multi Factor — A-share Multi-Factor Research Framework
 
-> **v3.2 · Phase 3 complete** · Python 3.10+ · 588 tests passing
+> **v3.3 · Phase 3 complete** · Python 3.10+ · 1027 tests passing
 
 A production-grade quantitative research framework for Chinese A-share markets.
 Build factor panels, run IC analysis, perform layer backtests, and assemble
@@ -8,7 +8,7 @@ multi-factor composites — all in a clean, extensible Python API.
 
 ---
 
-## Quick Start
+## Quick Start (v3.3+)
 
 ```bash
 # 1. Clone & install (editable)
@@ -18,11 +18,79 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -e ".[dev]"
 
-# 2. Run a single factor analysis
-python factor_analysis.py
+# 2. Run a single factor analysis (new main path)
+python scripts/run_analysis.py
 
 # 3. Batch-test all 28 built-in factors
-python scripts/run_batch.py --start 20180101 --end 20231231 --cache-dir cache/
+python scripts/run_batch.py
+
+# 4. Preview the resolved config (no analysis run)
+python scripts/run_analysis.py --show-config
+
+# 5. Override parameters on the fly
+python scripts/run_analysis.py --start 20180101 --end 20231231 --forward 21 --n-groups 5
+```
+
+> ⚠️ `python factor_analysis.py` and `python backtest_demo.py` still work but
+> emit a `DeprecationWarning`. They will be removed in v4.0. See [MIGRATION.md](MIGRATION.md).
+
+---
+
+## Configuration (v3.3+)
+
+All parameters live in `config/default.yaml`. There is no need to edit any
+Python script to change analysis parameters.
+
+```yaml
+# config/default.yaml (excerpt)
+data:
+  stocks_dir: "stocks/stocks/"
+  stock_basic: "股票列表-stock_basic.csv"
+
+backtest:
+  start: "20200101"
+  end:   "20251231"
+  forward: 21          # forward-return horizon (trading days)
+  n_groups: 5
+  direction: 1
+  periods_per_year: 12
+  rf: 0.02
+  cost_per_side: 0.002
+  resample_monthly: true
+
+cache:
+  cache_dir: "cache/"
+  min_calc_secs: 5.0
+
+output:
+  base_dir: "artifacts/"
+```
+
+### Override priority
+
+```
+CLI flags  >  --config my_override.yaml  >  config/default.yaml
+```
+
+```bash
+# Use a custom config file
+python scripts/run_analysis.py --config research/exp1.yaml
+
+# Override single values without a file
+python scripts/run_analysis.py --forward 5 --no-cache
+```
+
+### Programmatic access
+
+```python
+from config import load_config
+
+cfg = load_config()
+print(cfg.backtest.forward)           # 21
+print(cfg['backtest.n_groups'])       # 5  (dotted key also works)
+
+# Merge a custom YAML + CLI-style overrides
+cfg = load_config("my.yaml", overrides={"backtest.forward": 10})
 ```
 
 ---
@@ -31,38 +99,41 @@ python scripts/run_batch.py --start 20180101 --end 20231231 --cache-dir cache/
 
 ```
 Multi Factor/
+├── config/                     # ← NEW v3.3 — Config layer
+│   ├── default.yaml            #   Single source of truth for all parameters
+│   ├── loader.py               #   load_config(), ConfigNamespace (dot-access)
+│   └── __init__.py
+├── scripts/                    # ← v3.3 main path (use these, not root scripts)
+│   ├── run_analysis.py         #   Single-factor CLI entry point
+│   ├── run_batch.py            #   Multi-factor batch CLI
+│   └── run_validation.py       #   13-point DoD validation
 ├── factor_framework/           # Core library
-│   ├── factor_zoo.py           # 28 built-in factor definitions
-│   ├── factor_engine.py        # FactorEngine: register / compute / cache factors
-│   ├── pipeline.py             # FactorPipeline: end-to-end research pipeline
-│   ├── ic_analysis.py          # compute_ic, ic_stats, ic_significance, ic_decay
-│   ├── backtest.py             # layer_backtest, long_short_stats, turnover_analysis
-│   ├── neutralize.py           # neutralize_regression, neutralize_industry_zscore
-│   ├── operators.py            # cs_rank, cs_zscore, cs_winsorize
-│   ├── optimizer.py            # equal_weight, icir_weight
-│   ├── jit_ops.py              # Three-tier JIT acceleration
-│   ├── data_cleaner.py         # load_and_clean: raw CSV -> clean OHLCV DataFrame
-│   ├── engine/
-│   │   ├── panel_builder.py    # PanelBuilder: parallel panel construction + caching
-│   │   └── cache.py            # CacheLayer: L1 memory + L2 Parquet disk cache
-│   └── factors/                # Factor sub-package
-│       ├── meta.py             # FactorMeta dataclass + FactorCategory enum
-│       ├── registry.py         # FactorRegistry: global factor catalogue
-│       ├── momentum.py         # Re-exports: momentum_12_1, momentum_6_1, ...
-│       ├── volatility.py       # Re-exports: vol_20d, vol_60d, vol_skew, downside_vol
-│       ├── value.py            # Re-exports: value_pb, value_pe_ttm, ...
-│       ├── volume.py           # Re-exports: amihud_illiquidity, rsi_14, ...
-│       ├── transform.py        # TransformPipeline
-│       ├── ic_analyzer.py      # ICAnalyzer
-│       └── layer_backtester.py # LayerBacktester
-├── scripts/
-│   ├── run_analysis.py         # Entry-point -> factor_analysis.py
-│   └── run_batch.py            # Batch-test all built-in factors
-├── analysis/                   # Ad-hoc analysis notebooks & scripts
+│   ├── core/                   #   TimestampedPanel, ReturnPanel
+│   ├── engine/                 #   PanelBuilder, CacheLayer
+│   ├── data/                   #   DataStore, CSVDataStore
+│   ├── factors/                #   28 built-in factors by category + registry
+│   ├── pipeline.py             #   FactorPipeline (end-to-end orchestrator)
+│   ├── ic_analysis.py          #   compute_ic, ic_stats, ic_decay
+│   ├── backtest.py             #   layer_backtest, long_short_stats
+│   ├── neutralize.py           #   neutralize_regression
+│   ├── operators.py            #   cs_rank, cs_zscore, ts_mean, ts_stddev, ...
+│   ├── jit_ops.py              #   Three-tier JIT acceleration
+│   ├── dag.py                  #   Expression tree + CSE + DAGExecutor
+│   ├── optimizer.py            #   equal_weight, icir_weight
+│   ├── factor_engine.py        #   ⚠️ DEPRECATED — use PanelBuilder
+│   └── factor_zoo.py           #   ⚠️ DEPRECATED — use factors/{cat}.py
+├── tests/                      # ← NEW v3.3 — Consolidated test directory
+│   ├── test_factor_framework.py
+│   ├── test_data_cleaner.py
+│   ├── test_data_quality.py
+│   └── conftest.py
 ├── validation/
 │   └── test_lookahead_bias.py  # 69 look-ahead / path-consistency tests
-├── test_factor_framework.py    # Main test suite (519 tests)
-├── factor_analysis.py          # Interactive analysis script
+├── artifacts/                  # Output artifacts (gitignored)
+├── MIGRATION.md                # ← NEW v3.3 — Migration guide
+├── ARCHITECTURE.md             # ← NEW v3.3 — System architecture
+├── factor_analysis.py          # ⚠️ DEPRECATED entry point
+├── backtest_demo.py            # ⚠️ DEPRECATED demo script
 ├── pyproject.toml              # Build config + pytest settings
 └── stocks/stocks/              # Raw OHLCV CSVs (one file per stock)
 ```
@@ -245,8 +316,11 @@ warmup()   # call at startup to pre-compile JIT kernels
 ## Testing
 
 ```bash
-# Full test suite
-python -m pytest test_factor_framework.py test_lookahead_bias.py -q
+# Full test suite (uses testpaths from pyproject.toml)
+python -m pytest
+
+# Specific suite
+python -m pytest tests/test_factor_framework.py -q
 
 # Category filter
 python -m pytest -k "TransformPipeline or ICAnalyzer or LayerBacktester" -v
@@ -255,11 +329,13 @@ python -m pytest -k "TransformPipeline or ICAnalyzer or LayerBacktester" -v
 python -m pytest validation/test_lookahead_bias.py -v
 ```
 
-| File | Tests |
-|------|-------|
-| `test_factor_framework.py` | 550 |
-| `test_lookahead_bias.py` | 69 |
-| **Total** | **619** |
+| Suite | Location | Tests |
+|-------|----------|-------|
+| Framework unit + integration | `tests/test_factor_framework.py` | ~550 |
+| Data cleaner | `tests/test_data_cleaner.py` | ~243 |
+| Data quality | `tests/test_data_quality.py` | ~243 |
+| Look-ahead bias | `validation/test_lookahead_bias.py` | 69 |
+| **Total** | | **~1027** |
 
 ---
 
@@ -376,7 +452,15 @@ python scripts/run_validation.py   # 13/13 checks, exits 0 on pass
 
 ## Release History
 
-### v3.3 — Phase 2 DoD (current)
+### v3.3 — Phase 3: Reorganisation (current)
+- **Config layer**: `config/default.yaml` + `config/loader.py` — single source of truth for all parameters
+- **Main-path convergence**: `scripts/run_analysis.py` and `scripts/run_batch.py` are real CLI entry points consuming `config/default.yaml`
+- **Directory governance**: `tests/` directory consolidated; `pyproject.toml` testpaths updated; `artifacts/` output dir
+- **Deprecation markers**: `factor_analysis.py`, `backtest_demo.py`, `factor_engine.py`, `factor_zoo.py` all emit `DeprecationWarning` at runtime
+- **Docs**: `MIGRATION.md`, `ARCHITECTURE.md`, README updated
+- **+408 new tests → 1027 total**
+
+### v3.3 — Phase 2 DoD
 - **B1** `compute_ic` / `layer_backtest` wire `align_with()` semantic guard for `TimestampedPanel`
 - **B2** `PanelBuilder(store=...)` accepts `DataStore`; `FactorPipeline` auto-constructs `CSVDataStore`
 - **B3** `ic_decay(price_panel=...)` legacy path emits `DeprecationWarning`
@@ -412,3 +496,10 @@ python scripts/run_validation.py   # 13/13 checks, exits 0 on pass
 ## License
 
 MIT
+
+---
+
+## Further Reading
+
+- **[MIGRATION.md](MIGRATION.md)** — Step-by-step guide for migrating from v3.x to v3.3+: entry-point changes, API mapping table, common errors
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — Full system architecture diagram, layer descriptions, data-flow walkthrough, cache design

@@ -3,6 +3,17 @@ factor_zoo.py
 =============
 内置预定义因子库（示例 + 常用因子）。
 
+.. deprecated::
+    **兼容层（v3.3+）**：直接导入本模块是旧路径。
+    新代码推荐使用按类别拆分的子模块：
+
+    - `factor_framework.factors.momentum`  — 动量 / 反转因子
+    - `factor_framework.factors.volatility` — 波动率因子
+    - `factor_framework.factors.value`      — 估值 / 规模因子
+    - `factor_framework.factors.volume`     — 量价 / 流动性 / 技术因子
+
+    本模块作为向后兼容层保留至 v4.0，届时将移除。
+
 每个函数均遵循签名：(df: pd.DataFrame) -> pd.Series
 df 为单只股票的日频 DataFrame（已清洗，按交易日升序）。
 
