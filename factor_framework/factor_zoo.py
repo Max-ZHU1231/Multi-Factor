@@ -425,44 +425,139 @@ def volume_trend(df: pd.DataFrame, d: int = 20) -> pd.Series:
 # 因子注册辅助：一次性注册所有内置因子
 # ═══════════════════════════════════════════════════════════════════════════════
 
-BUILTIN_FACTORS = {
-    # 动量
-    "momentum_12_1":     momentum_12_1,
-    "momentum_6_1":      momentum_6_1,
-    "momentum_1m":       momentum_1m,
-    "momentum_52w_high": momentum_52w_high,
-    # 反转
-    "reversal_1w":       reversal_1w,
-    "reversal_1m":       reversal_1m,
-    # 波动率
-    "vol_20d":           vol_20d,
-    "vol_60d":           vol_60d,
-    "vol_skew":          vol_skew,
-    "downside_vol":      downside_vol,
-    # 估值
-    "value_pb":          value_pb,
-    "value_pe_ttm":      value_pe_ttm,
-    "value_ps_ttm":      value_ps_ttm,
-    # 规模
-    "size_log_mktcap":   size_log_mktcap,
-    "size_log_free_cap": size_log_free_cap,
-    # 量价
-    "amihud_illiquidity":amihud_illiquidity,
-    "turnover_rate":     turnover_rate,
-    "vol_price_corr":    vol_price_corr,
-    "vwap_deviation":    vwap_deviation,
-    "price_strength":    price_strength,
-    # 流动性质量
-    "bid_ask_spread_proxy": bid_ask_spread_proxy,
-    "zero_return_ratio":    zero_return_ratio,
-    "pastor_stambaugh":     pastor_stambaugh,
-    "order_imbalance":      order_imbalance,
-    # 技术分析
-    "rsi_14":            rsi_14,
-    "macd_signal":       macd_signal,
-    "bb_position":       bb_position,
-    "volume_trend":      volume_trend,
-}
+# ═══════════════════════════════════════════════════════════════════════════════
+# 因子注册辅助：一次性注册所有内置因子
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _register_builtins() -> "_CompatDict":
+    """
+    将所有内置因子注册到全局 REGISTRY，并返回 _CompatDict（向后兼容）。
+
+    依赖方向：factor_zoo → factors.registry（单向，无循环）。
+    必须在所有因子函数定义完成后调用（模块尾部）。
+    """
+    # Import sub-modules directly (not the factors package) to avoid
+    # triggering factors/__init__.py while factor_zoo is mid-initialisation.
+    from factor_framework.factors.meta import FactorMeta, FactorCategory
+    from factor_framework.factors.registry import REGISTRY
+
+    C = FactorCategory
+
+    _specs = [
+        # ── 动量因子 ────────────────────────────────────────────────────────
+        dict(name="momentum_12_1",     fn=momentum_12_1,     display_name="经典 12-1 月动量",
+             category=C.MOMENTUM,  warmup_days=252,
+             description="过去 252 日收益 - 过去 21 日收益（跳过最近 1 月）。后复权 + 对数差分。"),
+        dict(name="momentum_6_1",      fn=momentum_6_1,      display_name="6-1 月中期动量",
+             category=C.MOMENTUM,  warmup_days=126,
+             description="过去 126 日收益 - 过去 21 日收益。后复权 + 对数差分。"),
+        dict(name="momentum_1m",       fn=momentum_1m,       display_name="短期 1 月动量",
+             category=C.MOMENTUM,  warmup_days=21,
+             description="过去 21 日对数收益率。后复权 + 对数差分。"),
+        dict(name="momentum_52w_high", fn=momentum_52w_high, display_name="52 周高点动量",
+             category=C.MOMENTUM,  warmup_days=252,
+             description="收盘价 / 过去 252 日最高价。接近高点 → 正向信号。"),
+        # ── 反转因子 ────────────────────────────────────────────────────────
+        dict(name="reversal_1w",       fn=reversal_1w,       display_name="1 周短期反转",
+             category=C.REVERSAL,  warmup_days=5,
+             description="过去 5 日收益率的负值。函数内部已取负，direction=+1。"),
+        dict(name="reversal_1m",       fn=reversal_1m,       display_name="1 月短期反转",
+             category=C.REVERSAL,  warmup_days=21,
+             description="过去 21 日收益率的负值。函数内部已取负，direction=+1。"),
+        # ── 波动率因子 ──────────────────────────────────────────────────────
+        dict(name="vol_20d",           fn=vol_20d,           display_name="20 日历史波动率",
+             category=C.VOLATILITY, warmup_days=20,
+             description="20 日日收益率标准差的负值。函数内部已取负，direction=+1。"),
+        dict(name="vol_60d",           fn=vol_60d,           display_name="60 日历史波动率",
+             category=C.VOLATILITY, warmup_days=60,
+             description="60 日日收益率标准差的负值。函数内部已取负，direction=+1。"),
+        dict(name="vol_skew",          fn=vol_skew,          display_name="收益率偏度",
+             category=C.VOLATILITY, warmup_days=20,
+             description="20 日滚动偏度的负值（彩票效应：偏度大 → 预期收益低）。"),
+        dict(name="downside_vol",      fn=downside_vol,      display_name="下行波动率",
+             category=C.VOLATILITY, warmup_days=60,
+             description="仅用负收益计算的 60 日下行标准差（满窗口 min_periods=60）。"),
+        # ── 估值因子 ────────────────────────────────────────────────────────
+        dict(name="value_pb",          fn=value_pb,          display_name="账面市值比（BP）",
+             category=C.VALUE,     warmup_days=1,
+             description="1 / PB，值越大估值越低，正向因子。日频市场实时估值，lag_days=0。"),
+        dict(name="value_pe_ttm",      fn=value_pe_ttm,      display_name="盈利市值比（EP）",
+             category=C.VALUE,     warmup_days=1,
+             description="1 / PE(TTM)，值越大估值越低，正向因子。日频市场实时估值，lag_days=0。"),
+        dict(name="value_ps_ttm",      fn=value_ps_ttm,      display_name="营收市值比（SP）",
+             category=C.VALUE,     warmup_days=1,
+             description="1 / PS(TTM)，值越大越便宜，正向因子。日频市场实时估值，lag_days=0。"),
+        # ── 规模因子 ────────────────────────────────────────────────────────
+        dict(name="size_log_mktcap",   fn=size_log_mktcap,   display_name="对数总市值（小盘溢价）",
+             category=C.SIZE,      warmup_days=1,
+             neutral_by_default=False, skip_neutralize_cols=("市值",),
+             description="负对数总市值。函数内部取负，小盘→正向。不参与中性化。"),
+        dict(name="size_log_free_cap", fn=size_log_free_cap, display_name="对数流通市值（小盘溢价）",
+             category=C.SIZE,      warmup_days=1,
+             neutral_by_default=False, skip_neutralize_cols=("市值", "流通市值"),
+             description="负对数流通市值。函数内部取负，小盘→正向。不参与中性化。"),
+        # ── 量价因子 ────────────────────────────────────────────────────────
+        dict(name="amihud_illiquidity",fn=amihud_illiquidity, display_name="Amihud 非流动性",
+             category=C.VOLUME,    warmup_days=20,
+             description="|日收益率| / 成交额，20 日均值。值越大流动性越差，正向风险溢价。"),
+        dict(name="turnover_rate",     fn=turnover_rate,     display_name="平均换手率（反转）",
+             category=C.VOLUME,    warmup_days=20,
+             description="负 20 日平均换手率。函数内部取负：高换手 → 预期收益低。"),
+        dict(name="vol_price_corr",    fn=vol_price_corr,    display_name="量价相关性（负向）",
+             category=C.VOLUME,    warmup_days=20,
+             description="成交量与收盘价的负 20 日滚动相关。函数内部取负。"),
+        dict(name="vwap_deviation",    fn=vwap_deviation,    display_name="VWAP 偏离度",
+             category=C.VOLUME,    warmup_days=20,
+             description="(Close - VWAP) / VWAP，20 日内日内均价偏离。"),
+        dict(name="price_strength",    fn=price_strength,    display_name="价格强度（区间位置）",
+             category=C.VOLUME,    warmup_days=20,
+             description="收盘价在过去 20 日高低区间中的位置 [0,1]，类似 KD 的 K 值。"),
+        # ── 流动性质量因子 ──────────────────────────────────────────────────
+        dict(name="bid_ask_spread_proxy", fn=bid_ask_spread_proxy, display_name="买卖价差代理（流动性）",
+             category=C.LIQUIDITY, warmup_days=21,
+             description="负 (H-L)/C 均值（Corwin & Schultz 简化版）。值越大流动性越好。"),
+        dict(name="zero_return_ratio", fn=zero_return_ratio, display_name="零收益日占比（非活跃度）",
+             category=C.LIQUIDITY, warmup_days=21,
+             description="负 21 日内零收益日占比（Lesmond 1999）。占比低→流动性好→正向。"),
+        dict(name="pastor_stambaugh",  fn=pastor_stambaugh,  display_name="Pastor-Stambaugh 流动性",
+             category=C.LIQUIDITY, warmup_days=21,
+             description="负成交量加权收益率自相关（PS 2003 简化版）。后复权日收益率。"),
+        dict(name="order_imbalance",   fn=order_imbalance,   display_name="订单不平衡（买压代理）",
+             category=C.LIQUIDITY, warmup_days=21,
+             description="21 日价格变动方向均值（买压代理，动量信号）。"),
+        # ── 技术分析因子 ────────────────────────────────────────────────────
+        dict(name="rsi_14",            fn=rsi_14,            display_name="RSI-14 反转",
+             category=C.TECHNICAL, warmup_days=14,
+             description="50 - RSI(14)。超卖时为正，超买时为负，作为反转因子使用。"),
+        dict(name="macd_signal",       fn=macd_signal,       display_name="MACD 差值（动量）",
+             category=C.TECHNICAL, warmup_days=26,
+             description="(EMA12 - EMA26) / Close，归一化 DIF，正向动量信号。"),
+        dict(name="bb_position",       fn=bb_position,       display_name="布林带位置（反转）",
+             category=C.TECHNICAL, warmup_days=20,
+             description="0.5 - BB%，接近下轨（超卖）为正值，反转因子。"),
+        dict(name="volume_trend",      fn=volume_trend,      display_name="成交量趋势（线性斜率）",
+             category=C.TECHNICAL, warmup_days=20,
+             description="过去 20 日成交量线性回归归一化斜率，正值→量能放大。"),
+    ]
+
+    for spec in _specs:
+        meta = FactorMeta(
+            name                 = spec["name"],
+            fn                   = spec["fn"],
+            display_name         = spec["display_name"],
+            category             = spec["category"],
+            direction            = spec.get("direction", +1),
+            warmup_days          = spec.get("warmup_days", 252),
+            description          = spec.get("description", ""),
+            neutral_by_default   = spec.get("neutral_by_default", True),
+            skip_neutralize_cols = spec.get("skip_neutralize_cols", ()),
+        )
+        REGISTRY.register(meta)
+
+    return REGISTRY.to_compat_dict()
+
+
+BUILTIN_FACTORS = _register_builtins()
 
 
 def register_all(engine) -> None:

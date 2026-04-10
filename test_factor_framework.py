@@ -4552,3 +4552,445 @@ class TestBUG9Fix:
             ret_panels[fwd] = rp.loc[valid_idx]
         result = ic_decay(fp, return_panels=ret_panels, method="rank")
         assert list(result.index) == sorted(result.index), "结果 index 应按 forward 升序"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Phase 3 Tests -- FactorMeta, FactorRegistry, _CompatDict
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestFactorMeta:
+    """Tests for FactorMeta dataclass (factor_framework.factors.meta)."""
+
+    def _make_meta(self, **kw):
+        from factor_framework.factors.meta import FactorMeta, FactorCategory
+        defaults = dict(
+            name         = "test_factor",
+            fn           = lambda df: df.iloc[:, 0],
+            display_name = "Test Factor",
+            category     = FactorCategory.MOMENTUM,
+        )
+        defaults.update(kw)
+        return FactorMeta(**defaults)
+
+    def test_construction_defaults(self):
+        """FactorMeta should set sensible defaults for optional fields."""
+        meta = self._make_meta()
+        assert meta.direction == +1
+        assert meta.warmup_days == 252
+        assert meta.description == ""
+        assert meta.neutral_by_default is True
+        assert meta.skip_neutralize_cols == ()
+
+    def test_frozen(self):
+        """FactorMeta must be frozen (immutable after construction)."""
+        from dataclasses import FrozenInstanceError
+        meta = self._make_meta()
+        with pytest.raises(FrozenInstanceError):
+            meta.direction = -1
+
+    def test_invalid_direction_raises(self):
+        """direction not in {+1, -1} must raise ValueError."""
+        with pytest.raises(ValueError, match="direction"):
+            self._make_meta(direction=0)
+
+    def test_negative_warmup_raises(self):
+        """warmup_days < 0 must raise ValueError."""
+        with pytest.raises(ValueError, match="warmup_days"):
+            self._make_meta(warmup_days=-1)
+
+    def test_invalid_category_raises(self):
+        """Passing a plain string as category must raise TypeError."""
+        with pytest.raises(TypeError, match="category"):
+            self._make_meta(category="momentum")
+
+    def test_direction_plus1_is_long_short(self):
+        """is_long_short should be True when direction == +1."""
+        meta = self._make_meta(direction=+1)
+        assert meta.is_long_short is True
+
+    def test_direction_minus1_is_not_long_short(self):
+        """is_long_short should be False when direction == -1."""
+        meta = self._make_meta(direction=-1)
+        assert meta.is_long_short is False
+
+    def test_group_property(self):
+        """group should equal category.value string."""
+        from factor_framework.factors.meta import FactorCategory
+        meta = self._make_meta(category=FactorCategory.VOLATILITY)
+        assert meta.group == "volatility"
+
+    def test_repr_contains_name_and_category(self):
+        """__repr__ should include factor name and category."""
+        meta = self._make_meta()
+        r = repr(meta)
+        assert "test_factor" in r
+        assert "momentum" in r
+
+    def test_factor_category_enum_str_comparison(self):
+        """FactorCategory inherits str so == 'momentum' works directly."""
+        from factor_framework.factors.meta import FactorCategory
+        assert FactorCategory.MOMENTUM == "momentum"
+        assert FactorCategory.VOLATILITY == "volatility"
+        assert FactorCategory.SIZE == "size"
+
+    def test_skip_neutralize_cols_tuple(self):
+        """skip_neutralize_cols must be a tuple."""
+        meta = self._make_meta(skip_neutralize_cols=("市值", "行业"))
+        assert meta.skip_neutralize_cols == ("市值", "行业")
+
+    def test_neutral_by_default_false(self):
+        """neutral_by_default=False should be accepted."""
+        meta = self._make_meta(neutral_by_default=False)
+        assert meta.neutral_by_default is False
+
+    def test_all_categories_exist(self):
+        """All expected FactorCategory values must exist."""
+        from factor_framework.factors.meta import FactorCategory
+        expected = {
+            "momentum", "reversal", "volatility", "value",
+            "size", "volume", "liquidity", "technical", "composite", "custom",
+        }
+        actual = {c.value for c in FactorCategory}
+        assert expected == actual
+
+
+class TestFactorRegistry:
+    """Tests for FactorRegistry (factor_framework.factors.registry)."""
+
+    def _empty_registry(self):
+        from factor_framework.factors.registry import FactorRegistry
+        return FactorRegistry()
+
+    def _make_meta(self, name="mom", **kw):
+        from factor_framework.factors.meta import FactorMeta, FactorCategory
+        defaults = dict(
+            name         = name,
+            fn           = lambda df: df.iloc[:, 0],
+            display_name = name.upper(),
+            category     = FactorCategory.MOMENTUM,
+        )
+        defaults.update(kw)
+        return FactorMeta(**defaults)
+
+    # -- register / get --
+
+    def test_register_and_get(self):
+        """register() then get() should return the same FactorMeta."""
+        reg = self._empty_registry()
+        meta = self._make_meta("alpha")
+        reg.register(meta)
+        assert reg.get("alpha") is meta
+
+    def test_get_unknown_returns_none(self):
+        """get() for an unregistered name must return None."""
+        reg = self._empty_registry()
+        assert reg.get("nonexistent") is None
+
+    def test_get_fn_returns_callable(self):
+        """get_fn() must return the factor callable."""
+        reg = self._empty_registry()
+        fn = lambda df: df.iloc[:, 0]
+        from factor_framework.factors.meta import FactorMeta, FactorCategory
+        meta = FactorMeta(name="f", fn=fn, display_name="F", category=FactorCategory.CUSTOM)
+        reg.register(meta)
+        assert reg.get_fn("f") is fn
+
+    def test_get_fn_unknown_returns_none(self):
+        """get_fn() for unknown name must return None."""
+        reg = self._empty_registry()
+        assert reg.get_fn("nope") is None
+
+    def test_overwrite_warns(self):
+        """Re-registering same name must emit UserWarning."""
+        reg = self._empty_registry()
+        reg.register(self._make_meta("dup"))
+        with pytest.warns(UserWarning, match="already exists"):
+            reg.register(self._make_meta("dup"))
+
+    def test_register_wrong_type_raises(self):
+        """register() with non-FactorMeta must raise TypeError."""
+        reg = self._empty_registry()
+        with pytest.raises(TypeError, match="FactorMeta"):
+            reg.register({"name": "bad"})
+
+    def test_len(self):
+        """len() should reflect number of registered factors."""
+        reg = self._empty_registry()
+        assert len(reg) == 0
+        reg.register(self._make_meta("a"))
+        reg.register(self._make_meta("b"))
+        assert len(reg) == 2
+
+    def test_contains(self):
+        """'name' in registry should work."""
+        reg = self._empty_registry()
+        reg.register(self._make_meta("x"))
+        assert "x" in reg
+        assert "y" not in reg
+
+    def test_iter(self):
+        """Iterating registry should yield factor names."""
+        reg = self._empty_registry()
+        reg.register(self._make_meta("p"))
+        reg.register(self._make_meta("q"))
+        assert set(reg) == {"p", "q"}
+
+    # -- list_by_category --
+
+    def test_list_by_category(self):
+        """list_by_category() should filter and sort by name."""
+        from factor_framework.factors.meta import FactorMeta, FactorCategory
+        reg = self._empty_registry()
+        fn = lambda df: df.iloc[:, 0]
+        reg.register(FactorMeta("z_mom", fn, "Z", FactorCategory.MOMENTUM))
+        reg.register(FactorMeta("a_mom", fn, "A", FactorCategory.MOMENTUM))
+        reg.register(FactorMeta("a_rev", fn, "B", FactorCategory.REVERSAL))
+        moms = reg.list_by_category(FactorCategory.MOMENTUM)
+        assert [m.name for m in moms] == ["a_mom", "z_mom"]
+
+    def test_list_all_sorted(self):
+        """list_all() should return all metas sorted alphabetically."""
+        reg = self._empty_registry()
+        for name in ["c_fac", "a_fac", "b_fac"]:
+            reg.register(self._make_meta(name))
+        names = [m.name for m in reg.list_all()]
+        assert names == sorted(names)
+
+    # -- to_compat_dict --
+
+    def test_to_compat_dict_is_dict_subclass(self):
+        """to_compat_dict() must return a dict subclass."""
+        reg = self._empty_registry()
+        reg.register(self._make_meta("f1"))
+        cd = reg.to_compat_dict()
+        assert isinstance(cd, dict)
+
+    def test_to_compat_dict_keys_match(self):
+        """CompatDict keys should match registered factor names."""
+        reg = self._empty_registry()
+        reg.register(self._make_meta("f1"))
+        reg.register(self._make_meta("f2"))
+        cd = reg.to_compat_dict()
+        assert set(cd.keys()) == {"f1", "f2"}
+
+    def test_to_compat_dict_values_callable(self):
+        """CompatDict values must all be callable."""
+        reg = self._empty_registry()
+        reg.register(self._make_meta("f1"))
+        cd = reg.to_compat_dict()
+        assert callable(cd["f1"])
+
+    def test_to_compat_dict_get_meta(self):
+        """CompatDict.get_meta() must return the FactorMeta."""
+        reg = self._empty_registry()
+        meta = self._make_meta("f1")
+        reg.register(meta)
+        cd = reg.to_compat_dict()
+        assert cd.get_meta("f1") is meta
+
+    def test_to_compat_dict_registry_attr(self):
+        """CompatDict.registry must point back to the source FactorRegistry."""
+        reg = self._empty_registry()
+        reg.register(self._make_meta("f1"))
+        cd = reg.to_compat_dict()
+        assert cd.registry is reg
+
+    # -- summary_df --
+
+    def test_summary_df_shape(self):
+        """summary_df() should have one row per factor and the expected columns."""
+        reg = self._empty_registry()
+        for name in ["a", "b", "c"]:
+            reg.register(self._make_meta(name))
+        df = reg.summary_df()
+        assert df.shape[0] == 3
+        assert "category" in df.columns
+        assert "warmup_days" in df.columns
+        assert "neutral_by_default" in df.columns
+
+    def test_summary_df_index_is_name(self):
+        """summary_df() index should be factor names."""
+        reg = self._empty_registry()
+        reg.register(self._make_meta("my_factor"))
+        df = reg.summary_df()
+        assert "my_factor" in df.index
+
+    def test_repr(self):
+        """__repr__ should include count and category breakdown."""
+        reg = self._empty_registry()
+        reg.register(self._make_meta("m1"))
+        r = repr(reg)
+        assert "n=1" in r
+        assert "momentum" in r
+
+
+class TestCompatDictBackwardCompat:
+    """
+    Verify that _CompatDict (BUILTIN_FACTORS) is a drop-in replacement for
+    the old plain dict -- every legacy usage pattern must continue to work.
+    """
+
+    def setup_method(self):
+        from factor_framework.factor_zoo import BUILTIN_FACTORS
+        self.bf = BUILTIN_FACTORS
+
+    def test_isinstance_dict(self):
+        """isinstance(BUILTIN_FACTORS, dict) must be True."""
+        assert isinstance(self.bf, dict)
+
+    def test_len_28(self):
+        """BUILTIN_FACTORS must contain exactly 28 built-in factors."""
+        assert len(self.bf) == 28
+
+    def test_getitem_callable(self):
+        """BUILTIN_FACTORS['momentum_12_1'] must return a callable."""
+        fn = self.bf["momentum_12_1"]
+        assert callable(fn)
+
+    def test_keys_contains_all_builtin_names(self):
+        """All 28 built-in factor names must appear in BUILTIN_FACTORS.keys()."""
+        expected = {
+            "momentum_12_1", "momentum_6_1", "momentum_1m", "momentum_52w_high",
+            "reversal_1w", "reversal_1m",
+            "vol_20d", "vol_60d", "vol_skew", "downside_vol",
+            "value_pb", "value_pe_ttm", "value_ps_ttm",
+            "size_log_mktcap", "size_log_free_cap",
+            "amihud_illiquidity", "turnover_rate", "vol_price_corr",
+            "vwap_deviation", "price_strength",
+            "bid_ask_spread_proxy", "zero_return_ratio",
+            "pastor_stambaugh", "order_imbalance",
+            "rsi_14", "macd_signal", "bb_position", "volume_trend",
+        }
+        assert expected == set(self.bf.keys())
+
+    def test_items_iteration_yields_name_callable_pairs(self):
+        """for name, fn in BUILTIN_FACTORS.items() must yield (str, callable) pairs."""
+        for name, fn in self.bf.items():
+            assert isinstance(name, str)
+            assert callable(fn)
+
+    def test_in_operator(self):
+        """'momentum_12_1' in BUILTIN_FACTORS must be True."""
+        assert "momentum_12_1" in self.bf
+        assert "nonexistent_factor" not in self.bf
+
+    def test_get_meta_returns_factormeta(self):
+        """BUILTIN_FACTORS.get_meta(name) must return a FactorMeta."""
+        from factor_framework.factors.meta import FactorMeta
+        meta = self.bf.get_meta("momentum_12_1")
+        assert isinstance(meta, FactorMeta)
+        assert meta.name == "momentum_12_1"
+
+    def test_registry_attr_is_populated(self):
+        """BUILTIN_FACTORS.registry should be the populated global REGISTRY."""
+        from factor_framework.factors.registry import REGISTRY
+        assert self.bf.registry is REGISTRY
+        assert len(self.bf.registry) == 28
+
+
+class TestGlobalRegistry:
+    """Tests for the global REGISTRY singleton populated by factor_zoo."""
+
+    def setup_method(self):
+        # Ensure factor_zoo is loaded so REGISTRY is populated
+        import factor_framework.factor_zoo  # noqa: F401
+        from factor_framework.factors.registry import REGISTRY
+        self.reg = REGISTRY
+
+    def test_registry_has_28_factors(self):
+        """Global REGISTRY must contain all 28 built-in factors."""
+        assert len(self.reg) == 28
+
+    def test_registry_get_momentum(self):
+        """REGISTRY.get('momentum_12_1') must return correct metadata."""
+        from factor_framework.factors.meta import FactorCategory
+        meta = self.reg.get("momentum_12_1")
+        assert meta is not None
+        assert meta.category == FactorCategory.MOMENTUM
+        assert meta.warmup_days == 252
+        assert meta.direction == +1
+        assert meta.neutral_by_default is True
+
+    def test_size_factors_not_neutral_by_default(self):
+        """size_log_mktcap and size_log_free_cap must have neutral_by_default=False."""
+        for name in ("size_log_mktcap", "size_log_free_cap"):
+            meta = self.reg.get(name)
+            assert meta is not None, f"{name} not in REGISTRY"
+            assert meta.neutral_by_default is False, f"{name}.neutral_by_default should be False"
+
+    def test_size_log_mktcap_skip_cols(self):
+        """size_log_mktcap must skip the '市值' column in neutralization."""
+        meta = self.reg.get("size_log_mktcap")
+        assert "市值" in meta.skip_neutralize_cols
+
+    def test_size_log_free_cap_skip_cols(self):
+        """size_log_free_cap must skip both '市值' and '流通市值'."""
+        meta = self.reg.get("size_log_free_cap")
+        assert "市值" in meta.skip_neutralize_cols
+        assert "流通市值" in meta.skip_neutralize_cols
+
+    def test_all_directions_plus1(self):
+        """All 28 built-in factors must have direction == +1."""
+        for meta in self.reg.list_all():
+            assert meta.direction == +1, f"{meta.name}.direction should be +1"
+
+    def test_all_fns_callable(self):
+        """Every registered fn must be callable."""
+        for meta in self.reg.list_all():
+            assert callable(meta.fn), f"{meta.name}.fn is not callable"
+
+    def test_category_counts(self):
+        """Category distribution should match design spec."""
+        from factor_framework.factors.meta import FactorCategory
+        counts = {
+            FactorCategory.MOMENTUM:   4,
+            FactorCategory.REVERSAL:   2,
+            FactorCategory.VOLATILITY: 4,
+            FactorCategory.VALUE:      3,
+            FactorCategory.SIZE:       2,
+            FactorCategory.VOLUME:     5,
+            FactorCategory.LIQUIDITY:  4,
+            FactorCategory.TECHNICAL:  4,
+        }
+        for cat, expected_n in counts.items():
+            actual = len(self.reg.list_by_category(cat))
+            assert actual == expected_n, f"{cat.value}: expected {expected_n}, got {actual}"
+
+    def test_list_by_category_sorted(self):
+        """list_by_category() results should be sorted by name."""
+        from factor_framework.factors.meta import FactorCategory
+        moms = self.reg.list_by_category(FactorCategory.MOMENTUM)
+        names = [m.name for m in moms]
+        assert names == sorted(names)
+
+    def test_summary_df_28_rows(self):
+        """summary_df() must have 28 rows (one per built-in factor)."""
+        df = self.reg.summary_df()
+        assert len(df) == 28
+
+    def test_summary_df_has_required_columns(self):
+        """summary_df() must include all required metadata columns."""
+        df = self.reg.summary_df()
+        required = {"display_name", "category", "direction", "warmup_days",
+                    "neutral_by_default", "skip_neutralize_cols", "description"}
+        assert required.issubset(set(df.columns))
+
+    def test_fn_same_object_as_builtin_factors(self):
+        """REGISTRY fn references must be identical to BUILTIN_FACTORS values."""
+        from factor_framework.factor_zoo import BUILTIN_FACTORS
+        for name in BUILTIN_FACTORS:
+            meta = self.reg.get(name)
+            assert meta is not None
+            assert meta.fn is BUILTIN_FACTORS[name], \
+                f"{name}: REGISTRY.fn is not the same object as BUILTIN_FACTORS[name]"
+
+    def test_get_fn_convenience(self):
+        """REGISTRY.get_fn(name) must return the same callable as .get(name).fn."""
+        meta = self.reg.get("vol_20d")
+        assert self.reg.get_fn("vol_20d") is meta.fn
+
+    def test_warmup_days_sensible(self):
+        """All warmup_days must be >= 1."""
+        for meta in self.reg.list_all():
+            assert meta.warmup_days >= 1, f"{meta.name}.warmup_days={meta.warmup_days} < 1"
+
