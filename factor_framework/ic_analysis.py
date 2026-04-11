@@ -280,9 +280,12 @@ def ic_decay(
             fp = factor_panel.loc[valid_ret_rows]
             rp = ret_panel.loc[valid_ret_rows]
 
-            # 如果是 rank IC，预先计算排名因子面板（每组 valid_ret_rows 只算一次）
+            # 如果是 rank IC，预先计算排名因子面板（每个 fwd 只算一次）
+            # BUG FIX: cache_key 必须同时包含 fwd 和股票集，否则不同 fwd 的
+            # ret_panel 列集合不同时会导致 rp[common_stocks] 抛出 KeyError。
             if method == "rank":
-                cache_key = id(valid_ret_rows) if len(valid_ret_rows) == len(factor_panel) else len(valid_ret_rows)
+                # 用 fwd 作为 cache_key：每个 fwd 只进入循环一次，天然唯一。
+                cache_key = fwd
                 if cache_key not in _f_ranked_cache:
                     common_stocks = fp.columns.intersection(rp.columns)
                     fp_aligned = fp[common_stocks].astype(float)
