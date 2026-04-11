@@ -36,7 +36,7 @@ print(meta.display_name, meta.category, meta.warmup_days)
 df = REGISTRY.summary_df()   # 所有 28 个因子的元数据 DataFrame
 """
 
-from factor_framework.optimizer import equal_weight, icir_weight, print_weights
+from factor_framework.optimize.optimizer import equal_weight, icir_weight, print_weights
 from factor_framework.dag import (
     Expr, DataNode, OpNode, BinOpNode, ConstNode, PctChangeNode,
     data, const, op, pct_change,

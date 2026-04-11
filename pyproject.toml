@@ -4,8 +4,8 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name        = "multi-factor"
-version     = "3.3.0"
-description = "A-share multi-factor research framework (Phase 3)"
+version     = "4.0.0"
+description = "A-share multi-factor research framework (v4.0 — directory convergence)"
 readme      = "README.md"
 license     = { text = "MIT" }
 requires-python = ">=3.10"
@@ -26,6 +26,9 @@ dev = [
 ]
 
 [project.scripts]
+# v4.0 primary CLI — install with: pip install -e .
+mf           = "factor_framework.cli.main:main"
+# Legacy scripts — shim wrappers, kept for backward compat (removed in v4.2)
 run-analysis = "scripts.run_analysis:main"
 run-batch    = "scripts.run_batch:main"
 
@@ -39,3 +42,9 @@ testpaths = [
     "validation/",
 ]
 addopts   = "-q --tb=short"
+markers = [
+    "unit: fast, isolated function-level tests",
+    "integration: cross-module flow tests (may load data)",
+    "regression: IC/Sharpe snapshot baseline tests",
+    "slow: large-sample tests, run on demand with -m slow",
+]

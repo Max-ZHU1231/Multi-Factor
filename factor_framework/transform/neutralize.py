@@ -1,29 +1,34 @@
 """
-neutralize.py  [v4.0 COMPATIBILITY SHIM]
-==========================================
-⚠️  此模块已迁移至 factor_framework.transform.neutralize（v4.0）。
-    旧路径将在 v4.2 移除，请迁移 import：
+neutralize.py
+=============
+因子中性化模块。
 
-    旧：from factor_framework.neutralize import neutralize_regression
-    新：from factor_framework.transform.neutralize import neutralize_regression
-    或：from factor_framework.transform import neutralize_regression
+实现三种方法：
+1. 回归法中性化（推荐）: 市值 + 行业 + 波动率 + 风格因子 联合中性化（OLS / WLS）
+2. 分组标准化法（简易）: 行业内 Z-Score
+3. 正交化处理        : Gram-Schmidt 正交化，消除与已有因子的相关性
 
-因子中性化模块。支持回归法、行业内Z-Score和正交化三种方法。
-WLS 版本以流通市值为权重，贴近实际组合暴露。
+输入/输出均为 pd.DataFrame（index=日期，columns=ts_code）。
+
+Barra 风格因子中性化
+--------------------
+除市值和行业外，支持对以下风格因子做联合中性化：
+  - 波动率（σ）：过去 20 日收益率标准差
+  - Beta：过去 60 日市场 Beta
+  - 动量：过去 12-1 月动量
+  - 流动性：换手率代理
+
+中性化模型（OLS）：
+  f_i = α + β1·ln(MktCap_i) + Σγ_k·D_ik + β2·σ_i + β3·Beta_i
+        + β4·Mom_i + β5·Liq_i + ε_i
+
+WLS 版本以流通市值为权重，使中性化更贴近实际组合暴露。
 """
+
 from __future__ import annotations
 
-import warnings as _warnings
 import warnings
 from typing import Dict, List, Optional
-
-_warnings.warn(
-    "factor_framework.neutralize 已迁移至 factor_framework.transform.neutralize。"
-    "旧路径将在 v4.2 移除，请更新 import。",
-    DeprecationWarning,
-    stacklevel=2,
-)
-# ── 保留完整实现（向后兼容期内）──────────────────────────────────────────────
 
 import numpy as np
 import pandas as pd

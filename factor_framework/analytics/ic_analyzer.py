@@ -1,28 +1,43 @@
 """
-factor_framework.factors.ic_analyzer  [v4.0 COMPATIBILITY SHIM]
-================================================================
-⚠️  ICAnalyzer 已迁移至 factor_framework.analytics（v4.0）。
-    旧路径将在 v4.2 移除，请更新 import：
+factor_framework.factors.ic_analyzer
+======================================
+ICAnalyzer —— 结构化 IC 分析封装，统一 ic_series / ic_stats / ic_decay
+三者的调用、结果存储与格式化输出。
 
-    旧：from factor_framework.factors.ic_analyzer import ICAnalyzer
-    新：from factor_framework.analytics import ICAnalyzer
+设计原则（v3.0 规范 §4.2）
+--------------------------
+- ICAnalyzer 接收已对齐的因子面板和收益率面板（或多期 return_panels 字典）。
+- 内部调用 ic_analysis 模块的函数，将结果收拢到一个对象中。
+- 提供 .summary() -> dict、.decay_df -> pd.DataFrame 两个主要输出接口。
+- 不执行截面预处理（那是 TransformPipeline 的职责）。
+- 向下游（FactorReport / FactorPipeline）提供统一的 IC 结果结构。
+
+使用方式
+--------
+    from factor_framework.factors.ic_analyzer import ICAnalyzer
+
+    analyzer = ICAnalyzer(
+        factor_panel  = factor_panel,    # 已经过 TransformPipeline 处理
+        return_panel  = return_panel,    # forward=21 的主收益率面板
+        return_panels = {1: rp1, 5: rp5, 21: rp21},  # IC 衰减用
+        method        = "rank",
+        periods_per_year = 12,           # 月频=12
+    )
+    analyzer.run()
+
+    print(analyzer.summary())
+    print(analyzer.decay_df)
+    print(analyzer.ic_series.mean())
 """
 
 from __future__ import annotations
-import warnings as _warnings
-_warnings.warn(
-    "factor_framework.factors.ic_analyzer 已迁移至 factor_framework.analytics。"
-    "旧路径将在 v4.2 移除，请更新 import。",
-    DeprecationWarning,
-    stacklevel=2,
-)
 
 from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
-from factor_framework.ic_analysis import (
+from factor_framework.analytics.ic_analysis import (
     compute_ic,
     ic_stats,
     ic_decay,

@@ -1,27 +1,20 @@
 """
-ic_analysis.py  [v4.0 COMPATIBILITY SHIM]
-==========================================
-⚠️  此模块已迁移至 factor_framework.analytics.ic_analysis（v4.0）。
-    旧路径将在 v4.2 移除，请迁移 import：
+ic_analysis.py
+==============
+IC 分析模块。
 
-    旧：from factor_framework.ic_analysis import compute_ic, ic_decay
-    新：from factor_framework.analytics.ic_analysis import compute_ic, ic_decay
-    或：from factor_framework.analytics import compute_ic, ic_decay
-
-    此 shim 在 v4.0/v4.1 期间保持完整功能，仅新增 DeprecationWarning。
+功能
+----
+- compute_ic()       : 逐期计算 Normal IC 或 Rank IC
+- ic_stats()         : Mean IC、Std IC、ICIR、胜率、t 统计量
+- ic_decay()         : IC 衰减分析（不同 forward 期的 Mean IC）
+- ic_cumulative()    : IC 累积曲线
+- ic_significance()  : Newey-West 修正 t 检验
 """
+
 from __future__ import annotations
 
-import warnings as _warnings
 from typing import Dict, List, Optional, Tuple
-
-_warnings.warn(
-    "factor_framework.ic_analysis 已迁移至 factor_framework.analytics.ic_analysis。"
-    "旧路径将在 v4.2 移除，请更新 import。",
-    DeprecationWarning,
-    stacklevel=2,
-)
-# ── 保留完整实现（向后兼容期内，实现体仍在此处）─────────────────────────────
 
 import numpy as np
 import pandas as pd
@@ -472,7 +465,7 @@ def residual_ic(
     -------
     dict: residual_ic_series, stats
     """
-    from factor_framework.neutralize import orthogonalize
+    from factor_framework.transform.neutralize import orthogonalize
     resid_panel = orthogonalize(new_factor, existing_factors)
     ic_series   = compute_ic(resid_panel, return_panel, method=method)
     st          = ic_stats(ic_series)

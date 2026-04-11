@@ -1,21 +1,38 @@
 """
-factor_framework.factors.layer_backtester  [v4.0 COMPATIBILITY SHIM]
-=====================================================================
-⚠️  LayerBacktester 已迁移至 factor_framework.analytics（v4.0）。
-    旧路径将在 v4.2 移除，请更新 import：
+factor_framework.factors.layer_backtester
+===========================================
+LayerBacktester —— 分层回测封装，统一 layer_backtest / long_short_stats /
+turnover_analysis 三者的调用、结果存储与格式化输出。
 
-    旧：from factor_framework.factors.layer_backtester import LayerBacktester
-    新：from factor_framework.analytics import LayerBacktester
+设计原则（v3.0 规范 §4.3）
+--------------------------
+- LayerBacktester 接收已处理的因子面板 + 收益率面板。
+- 内部调用 backtest 模块函数，将结果收拢到一个对象。
+- 提供 .summary() -> dict、.layer_ret -> pd.DataFrame、
+  .nav -> pd.DataFrame（净值曲线）三个主要输出接口。
+- 不执行截面预处理（TransformPipeline 的职责）。
+
+使用方式
+--------
+    from factor_framework.factors.layer_backtester import LayerBacktester
+
+    bt = LayerBacktester(
+        factor_panel     = factor_panel,    # 已标准化
+        return_panel     = return_panel,    # forward=21
+        n_groups         = 5,
+        direction        = 1,
+        periods_per_year = 12,
+        rf               = 0.0,
+        cost_per_side    = 0.002,
+    )
+    bt.run()
+
+    print(bt.summary())
+    print(bt.layer_ret.head())
+    print(bt.nav.tail())
 """
 
 from __future__ import annotations
-import warnings as _warnings
-_warnings.warn(
-    "factor_framework.factors.layer_backtester 已迁移至 factor_framework.analytics。"
-    "旧路径将在 v4.2 移除，请更新 import。",
-    DeprecationWarning,
-    stacklevel=2,
-)
 
 from typing import Dict, Optional
 

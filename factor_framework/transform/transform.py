@@ -1,27 +1,44 @@
 """
-factor_framework.factors.transform  [v4.0 COMPATIBILITY SHIM]
-===============================================================
-⚠️  TransformPipeline 已迁移至 factor_framework.transform（v4.0）。
-    旧路径将在 v4.2 移除，请更新 import：
-
-    旧：from factor_framework.factors.transform import TransformPipeline
-    新：from factor_framework.transform import TransformPipeline
-
+factor_framework.factors.transform
+====================================
 TransformPipeline —— 可组合的横截面变换管道。
-支持链式调用：pipe.winsorize().neutralize(...).standardize('rank')
+
+设计原则（v3.0 规范 §4.1）
+--------------------------
+- 每个变换步骤是一个 (panel: pd.DataFrame) -> pd.DataFrame 的纯函数。
+- TransformPipeline 持有有序步骤列表，通过 pipe.transform(panel) 顺序执行。
+- 支持链式构建：pipe.winsorize().neutralize(...).standardize('rank')
+- 内置步骤：winsorize、standardize、neutralize（市值+行业）
+- 支持注册自定义步骤（register_step）
+- 不修改传入面板（每步骤返回新 DataFrame）
+
+使用方式
+--------
+    from factor_framework.factors.transform import TransformPipeline
+    from factor_framework.factor_engine import FactorEngine
+
+    engine = FactorEngine("Stocks/")
+    pipe = (
+        TransformPipeline(engine)
+        .winsorize()
+        .neutralize(mktcap_panel=mktcap_panel, industry_map=engine.industry_map)
+        .standardize("rank")
+    )
+    processed_panel = pipe.transform(raw_factor_panel)
+
+完整参数控制
+-----------
+    pipe = TransformPipeline(engine)
+    pipe.winsorize(n_std=3.0)
+    pipe.neutralize(mktcap_panel=mp, industry_map=imap)
+    pipe.standardize("zscore")
+    result = pipe.transform(factor_panel)
 """
+
 from __future__ import annotations
 
 import warnings
-import warnings as _warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple
-
-_warnings.warn(
-    "factor_framework.factors.transform 已迁移至 factor_framework.transform。"
-    "旧路径将在 v4.2 移除，请更新 import。",
-    DeprecationWarning,
-    stacklevel=2,
-)
 
 import pandas as pd
 
@@ -93,7 +110,7 @@ class TransformPipeline:
             )
             return self
 
-        from factor_framework.neutralize import neutralize_regression
+        from factor_framework.transform.neutralize import neutralize_regression
 
         def _step(panel: pd.DataFrame) -> pd.DataFrame:
             mp = mktcap_panel
