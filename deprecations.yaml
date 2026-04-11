@@ -1,0 +1,139 @@
+# deprecations.yaml
+# Canonical registry of all deprecated interfaces in Multi Factor.
+#
+# Fields:
+#   id            : unique identifier
+#   kind          : module | script | function | class | parameter
+#   target        : deprecated path / symbol
+#   replacement   : what to use instead
+#   warn_since    : version when DeprecationWarning was first emitted
+#   remove_in     : planned removal version
+#   migration_note: one-line human migration hint
+#   warn_template : key tokens that must appear in the emitted warning message
+
+schema_version: "1.0"
+generated: "2026-04-11"
+
+deprecations:
+
+  # ── Entry-point scripts ────────────────────────────────────────────────────
+
+  - id: script_factor_analysis
+    kind: script
+    target: factor_analysis.py
+    replacement: "mf single --factor NAME"
+    warn_since: "3.3.0"
+    remove_in: "4.2.0"
+    migration_note: "Use `mf single --factor NAME` instead."
+
+  - id: script_backtest_demo
+    kind: script
+    target: backtest_demo.py
+    replacement: "mf single --factor NAME"
+    warn_since: "3.3.0"
+    remove_in: "4.2.0"
+    migration_note: "Use `mf single --factor NAME` instead."
+
+  - id: script_run_analysis
+    kind: script
+    target: scripts/run_analysis.py
+    replacement: "mf single"
+    warn_since: "4.0.0"
+    remove_in: "4.2.0"
+    migration_note: "Use `mf single` instead."
+
+  - id: script_run_batch
+    kind: script
+    target: scripts/run_batch.py
+    replacement: "mf batch"
+    warn_since: "4.0.0"
+    remove_in: "4.2.0"
+    migration_note: "Use `mf batch` instead."
+
+  - id: script_run_factor_screening
+    kind: script
+    target: scripts/run_factor_screening.py
+    replacement: "mf batch"
+    warn_since: "4.0.0"
+    remove_in: "4.2.0"
+    migration_note: "Use `mf batch` instead."
+
+  # ── Module import paths ────────────────────────────────────────────────────
+
+  - id: module_ic_analysis
+    kind: module
+    target: factor_framework.ic_analysis
+    replacement: factor_framework.analytics.ic_analysis
+    warn_since: "4.0.0"
+    remove_in: "4.2.0"
+    migration_note: >
+      Replace `from factor_framework.ic_analysis import X`
+      with    `from factor_framework.analytics.ic_analysis import X`.
+    warn_template:
+      new_path_token: "analytics.ic_analysis"
+      remove_version_token: "v4.2"
+
+  - id: module_neutralize
+    kind: module
+    target: factor_framework.neutralize
+    replacement: factor_framework.transform.neutralize
+    warn_since: "4.0.0"
+    remove_in: "4.2.0"
+    migration_note: >
+      Replace `from factor_framework.neutralize import X`
+      with    `from factor_framework.transform.neutralize import X`.
+    warn_template:
+      new_path_token: "transform.neutralize"
+      remove_version_token: "v4.2"
+
+  - id: module_optimizer
+    kind: module
+    target: factor_framework.optimizer
+    replacement: factor_framework.optimize.optimizer
+    warn_since: "4.0.0"
+    remove_in: "4.2.0"
+    migration_note: >
+      Replace `from factor_framework.optimizer import X`
+      with    `from factor_framework.optimize.optimizer import X`.
+    warn_template:
+      new_path_token: "optimize"
+      remove_version_token: "v4.2"
+
+  - id: module_factors_transform
+    kind: module
+    target: factor_framework.factors.transform
+    replacement: factor_framework.transform
+    warn_since: "4.0.0"
+    remove_in: "4.2.0"
+    migration_note: >
+      Replace `from factor_framework.factors.transform import X`
+      with    `from factor_framework.transform import X`.
+    warn_template:
+      new_path_token: "factor_framework.transform"
+      remove_version_token: "v4.2"
+
+  - id: module_factors_ic_analyzer
+    kind: module
+    target: factor_framework.factors.ic_analyzer
+    replacement: factor_framework.analytics.ic_analyzer
+    warn_since: "4.0.0"
+    remove_in: "4.2.0"
+    migration_note: >
+      Replace `from factor_framework.factors.ic_analyzer import X`
+      with    `from factor_framework.analytics.ic_analyzer import X`.
+    warn_template:
+      new_path_token: "analytics"
+      remove_version_token: "v4.2"
+
+  - id: module_factors_layer_backtester
+    kind: module
+    target: factor_framework.factors.layer_backtester
+    replacement: factor_framework.analytics.layer_backtester
+    warn_since: "4.0.0"
+    remove_in: "4.2.0"
+    migration_note: >
+      Replace `from factor_framework.factors.layer_backtester import X`
+      with    `from factor_framework.analytics.layer_backtester import X`.
+    warn_template:
+      new_path_token: "analytics"
+      remove_version_token: "v4.2"

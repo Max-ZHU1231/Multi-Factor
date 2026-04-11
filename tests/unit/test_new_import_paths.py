@@ -63,9 +63,14 @@ class TestLegacyShimPaths:
     """Old v3.x paths must still work but emit DeprecationWarning."""
 
     def test_ic_analysis_shim_warns(self):
+        import importlib, sys
+        # Evict cached module so the warning fires even when run after test_deprecations.py
+        for key in [k for k in sys.modules if k == "factor_framework.ic_analysis"
+                    or k.startswith("factor_framework.ic_analysis.")]:
+            del sys.modules[key]
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            from factor_framework import ic_analysis  # noqa: F401
+            importlib.import_module("factor_framework.ic_analysis")
             dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
             assert len(dep_warnings) >= 1
             assert "analytics" in str(dep_warnings[0].message).lower()
