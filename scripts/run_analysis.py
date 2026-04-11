@@ -1,47 +1,100 @@
 #!/usr/bin/env python
 """
-scripts/run_analysis.py
-=======================
-全量因子分析入口脚本（v3.3 新主路径）。
+scripts/run_analysis.py  [已弃用 — 将在 v4.2 移除]
+=====================================================
+⚠️  此脚本已弃用，请改用:
+    mf single --factor <name> [参数]
 
-用法
-----
-cd "d:\\OneDrive - HKUST Connect\\桌面\\Multi Factor"
+参数映射
+--------
+  --start    →  mf single --start
+  --end      →  mf single --end
+  --forward  →  mf single --forward
+  --n-groups →  mf single --n-groups
+  --config   →  mf single --config
+  --output   →  mf single --output
+  --no-cache →  mf single --no-cache
 
-# 使用 default.yaml 默认配置
-.venv\\Scripts\\python.exe scripts/run_analysis.py
-
-# 覆盖单个参数
-.venv\\Scripts\\python.exe scripts/run_analysis.py --forward 10 --start 20210101
-
-# 指定用户配置文件（叠加在 default.yaml 之上）
-.venv\\Scripts\\python.exe scripts/run_analysis.py --config config/my_config.yaml
-
-参数优先级
-----------
-CLI 参数 > --config 文件 > config/default.yaml
-
-输出
-----
-output/factor_analysis/
-    ic_summary.csv
-    ic_series/<factor>.csv
-    layer_stats/<factor>.csv
-    plots/
-        01_ic_timeseries.png
-        02_cumulative_ic.png
-        03_ic_summary_heatmap.png
-        04_layer_nav/<factor>.png
-        05_factor_corr_heatmap.png
-        06_cluster_dendrogram.png
-        07_cluster_heatmap.png
+此脚本现在仅作为向后兼容的 shim，内部转发给 ``mf single``。
+业务逻辑已完全迁移至 factor_framework/cli/main.py。
 """
 from __future__ import annotations
 
-import argparse
+import subprocess
 import sys
 import warnings
 from pathlib import Path
+
+# ── 弃用警告 ─────────────────────────────────────────────────────────────────
+warnings.warn(
+    "\n⚠️  scripts/run_analysis.py 已弃用，将在 v4.2 移除。\n"
+    "   请改用: mf single --factor <name> [参数]\n"
+    "   完整文档: docs/cli-contract.md\n",
+    DeprecationWarning,
+    stacklevel=1,
+)
+print(
+    "\n⚠️  scripts/run_analysis.py 已弃用，将在 v4.2 移除。\n"
+    "   请改用: mf single --factor <name> [参数]\n",
+    file=sys.stderr,
+)
+
+import argparse
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=(
+            "[已弃用] scripts/run_analysis.py — 转发至 mf single。\n"
+            "请直接使用: mf single --factor <name> [参数]"
+        )
+    )
+    p.add_argument("--config",      default=None)
+    p.add_argument("--start",       default=None)
+    p.add_argument("--end",         default=None)
+    p.add_argument("--forward",     type=int, default=None)
+    p.add_argument("--n-groups",    type=int, default=None, dest="n_groups")
+    p.add_argument("--output",      default=None)
+    p.add_argument("--no-cache",    action="store_true")
+    p.add_argument("--show-config", action="store_true")
+    # Legacy positional: ignored silently
+    p.add_argument("extra", nargs="*", help=argparse.SUPPRESS)
+    return p.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+
+    # Build forwarded argv for  mf single
+    fwd = [sys.executable, "-m", "factor_framework.cli", "single"]
+
+    # run_analysis had no --factor concept (ran all); forward to batch instead
+    # if no factor info is available, warn and redirect to mf batch
+    print(
+        "  ℹ️  run_analysis.py 没有 --factor 参数。\n"
+        "     将转发至 mf batch （与原来行为等价）。",
+        file=sys.stderr,
+    )
+    fwd = [sys.executable, "-m", "factor_framework.cli", "batch"]
+
+    if args.config:      fwd += ["--config",   args.config]
+    if args.start:       fwd += ["--start",    args.start]
+    if args.end:         fwd += ["--end",      args.end]
+    if args.forward:     fwd += ["--forward",  str(args.forward)]
+    if args.n_groups:    fwd += ["--n-groups", str(args.n_groups)]
+    if args.output:      fwd += ["--output",   args.output]
+    if args.no_cache:    fwd += ["--no-cache"]
+    if args.show_config: fwd += ["--show-config"]
+
+    result = subprocess.run(fwd, cwd=str(ROOT))
+    sys.exit(result.returncode)
+
+
+if __name__ == "__main__":
+    main()
+
 
 warnings.filterwarnings("ignore")
 
