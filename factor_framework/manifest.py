@@ -95,10 +95,23 @@ def _config_hash(cfg, length: int = 16) -> str:
     """
     计算配置对象的哈希（SHA-256 前 length 位）。
 
-    接受 ConfigNamespace（有 .to_dict()）或普通 dict。
+    优先级（从高到低）：
+    1. ResearchConfig — 调用 to_stable_dict()（排序键、去瞬时字段，跨会话稳定）
+    2. 有 .to_dict()  — 使用 .to_dict()（ConfigNamespace 等）
+    3. dict / 其他   — 直接 dict() 或 repr()
+
+    .. note::
+        使用 ``to_stable_dict()`` 而非 ``to_dict()`` 是为了确保 symbols 等大列表
+        不参与哈希（避免股票列表细微变化导致哈希漂移）。
     """
     try:
-        d = cfg.to_dict() if hasattr(cfg, "to_dict") else dict(cfg)
+        # ResearchConfig: 使用稳定字典（排序+去瞬时字段）
+        if hasattr(cfg, "to_stable_dict"):
+            d = cfg.to_stable_dict()
+        elif hasattr(cfg, "to_dict"):
+            d = cfg.to_dict()
+        else:
+            d = dict(cfg)
     except Exception:
         d = repr(cfg)
     return _sha256_short(d, length)

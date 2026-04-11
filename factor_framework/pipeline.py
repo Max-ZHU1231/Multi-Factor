@@ -54,6 +54,7 @@ from factor_framework.operators     import cs_rank, cs_zscore, cs_winsorize
 from factor_framework.optimizer     import equal_weight, icir_weight, print_weights
 from factor_framework.engine.cache         import CacheLayer
 from factor_framework.engine.panel_builder import PanelBuilder
+from factor_framework.research_config      import ResearchConfig
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -363,7 +364,7 @@ class FactorPipeline:
 
     def run(
         self,
-        factor_name:      str,
+        factor_name:      Optional[str] = None,
         start:            Optional[str] = None,
         end:              Optional[str] = None,
         forward:          int = 21,
@@ -379,13 +380,21 @@ class FactorPipeline:
         cost_per_side:    float = 0.002,
         symbols:          Optional[List[str]] = None,
         resample_monthly: bool = True,               # 月度重采样（推荐）
+        config:           Optional[ResearchConfig] = None,  # Phase C: 结构化配置
     ) -> FactorReport:
         """
         执行完整的因子检验流程。
 
+        双入口兼容（Phase C）
+        ---------------------
+        * **新方式**：``run(config=ResearchConfig(...))`` — 推荐，便于哈希和序列化
+        * **旧方式**：``run(factor_name=..., forward=..., ...)`` — 继续支持，
+          内部自动转换为 ResearchConfig，行为与之前完全一致
+
         Parameters
         ----------
-        factor_name      : 已注册的因子名称
+        config           : ResearchConfig 实例（提供时所有其他参数被忽略）
+        factor_name      : 已注册的因子名称（config=None 时必须提供）
         start / end      : 日期范围（YYYYMMDD）
         forward          : 预测期（天）
         n_groups         : 分层数
@@ -406,6 +415,47 @@ class FactorPipeline:
         -------
         FactorReport
         """
+        # ── Phase C: 统一转换为 ResearchConfig ──────────────────────────
+        if config is None:
+            if not factor_name:
+                raise ValueError(
+                    "run() 需要提供 factor_name 或 config=ResearchConfig(...)。"
+                )
+            config = ResearchConfig.from_kwargs(
+                factor_name      = factor_name,
+                start            = start,
+                end              = end,
+                forward          = forward,
+                n_groups         = n_groups,
+                direction        = direction,
+                standardize      = standardize,
+                neutralize       = neutralize,
+                winsorize        = winsorize,
+                ic_method        = ic_method,
+                ic_forward_list  = tuple(ic_forward_list),
+                periods_per_year = periods_per_year,
+                rf               = rf,
+                cost_per_side    = cost_per_side,
+                symbols          = symbols,
+                resample_monthly = resample_monthly,
+            )
+        # 从 config 提取所有运行参数（统一来源）
+        factor_name      = config.factor_name
+        start            = config.start
+        end              = config.end
+        forward          = config.forward
+        n_groups         = config.n_groups
+        direction        = config.direction
+        standardize      = config.standardize
+        neutralize       = config.neutralize
+        winsorize        = config.winsorize
+        ic_method        = config.ic_method
+        ic_forward_list  = config.ic_forward_list
+        periods_per_year = config.periods_per_year
+        rf               = config.rf
+        cost_per_side    = config.cost_per_side
+        symbols          = config.symbols
+        resample_monthly = config.resample_monthly
         import time as _time
         _run_start = _time.perf_counter()
         if self._cache is not None:
@@ -537,7 +587,7 @@ class FactorPipeline:
             _ci = self._cache.cache_info() if self._cache is not None else {}
             self.last_manifest = RunManifest.create(
                 factors    = [factor_name],
-                cfg        = {},           # 无 cfg 时传空 dict
+                cfg        = config,           # Phase C: 传入标准化的 ResearchConfig
                 cache_info = _ci,
                 start_time = _run_start,
                 failures   = [],

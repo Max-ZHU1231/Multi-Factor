@@ -169,7 +169,8 @@ def _cmd_single(args: argparse.Namespace) -> int:
             try:
                 if not getattr(args, "quiet", False):
                     print(f"\n{'─'*56}\n  因子: {factor_name}\n{'─'*56}")
-                report = pipe.run(
+                from factor_framework.research_config import ResearchConfig
+                rc = ResearchConfig.from_kwargs(
                     factor_name      = factor_name,
                     start            = cfg.backtest.start,
                     end              = cfg.backtest.end,
@@ -184,6 +185,7 @@ def _cmd_single(args: argparse.Namespace) -> int:
                     cost_per_side    = cfg.backtest.cost_per_side,
                     resample_monthly = cfg.backtest.resample_monthly,
                 )
+                report = pipe.run(config=rc)
                 report.print_summary()
                 report.save(factor_out)
                 results.append(factor_name)
@@ -247,7 +249,8 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             if not getattr(args, "quiet", False):
                 print(f"\n{'='*60}\n因子: {name}\n{'='*60}")
             try:
-                report = pipe.run(
+                from factor_framework.research_config import ResearchConfig
+                rc = ResearchConfig.from_kwargs(
                     factor_name      = name,
                     start            = cfg.backtest.start,
                     end              = cfg.backtest.end,
@@ -262,6 +265,7 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                     cost_per_side    = cfg.backtest.cost_per_side,
                     resample_monthly = cfg.backtest.resample_monthly,
                 )
+                report = pipe.run(config=rc)
                 s = report.summary_dict
                 s["factor"] = name
                 s["error"] = ""
