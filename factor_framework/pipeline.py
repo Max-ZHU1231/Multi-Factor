@@ -331,6 +331,10 @@ class FactorPipeline:
         # 均通过 self.engine.xxx 访问，保持零改动。
         self.engine = self._builder.engine
 
+        # ── Phase D: 暴露 cache 引用 + 最后一次运行的 manifest ──────────
+        self._cache = _cache
+        self.last_manifest = None  # type: Optional[object]  # RunManifest | None
+
     # ── 因子注册 ──────────────────────────────────────────────────────────────
 
     def register_factor(self, name: str, func: FactorFn) -> "FactorPipeline":
@@ -402,6 +406,11 @@ class FactorPipeline:
         -------
         FactorReport
         """
+        import time as _time
+        _run_start = _time.perf_counter()
+        if self._cache is not None:
+            self._cache.reset_stats()
+
         print(f"\n[1/6] 构建因子面板: {factor_name} ...")
         factor_panel = self._builder.build_panel(
             factor_name, start=start, end=end, symbols=symbols
@@ -521,6 +530,22 @@ class FactorPipeline:
             factor_panel = factor_panel,
             return_panel = return_panel,
         )
+
+        # ── Phase D: 生成 RunManifest ─────────────────────────────────────
+        try:
+            from factor_framework.manifest import RunManifest
+            _ci = self._cache.cache_info() if self._cache is not None else {}
+            self.last_manifest = RunManifest.create(
+                factors    = [factor_name],
+                cfg        = {},           # 无 cfg 时传空 dict
+                cache_info = _ci,
+                start_time = _run_start,
+                failures   = [],
+                stocks_dir = self._builder.stocks_dir,
+                git_sha    = (_ci.get("git_sha") if _ci else None),
+            )
+        except Exception as _mex:
+            warnings.warn(f"[manifest] 生成失败（非致命）: {_mex}")
 
         print("\n✓ 流程完成。")
         return report

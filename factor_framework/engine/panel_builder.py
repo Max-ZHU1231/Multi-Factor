@@ -155,12 +155,27 @@ class PanelBuilder:
         start:       Optional[str],
         end:         Optional[str],
         symbols:     Optional[List[str]],
-    ) -> str:
-        """生成缓存键（MD5），规范化 None 参数。"""
+    ) -> tuple:
+        """
+        生成 (v2_key, v1_legacy_key) 元组。
+
+        v2 键包含 transform_config_hash / semantic_contract_version / git_sha，
+        v1 键保留向后兼容（旧 Parquet 文件读取）。
+        """
         _start   = start   or "ALL"
         _end     = end     or "ALL"
         _symbols = symbols or self.all_symbols()
-        return CacheLayer.make_key(factor_name, _start, _end, _symbols)
+
+        # v1 旧键（兼容现有 Parquet 缓存）
+        v1_key = CacheLayer.make_key(factor_name, _start, _end, _symbols)
+
+        # v2 新键（含语义版本等额外维度）
+        if hasattr(self.cache, "make_key_v2"):
+            v2_key = self.cache.make_key_v2(factor_name, _start, _end, _symbols)
+        else:
+            v2_key = v1_key   # 降级兼容
+
+        return v2_key, v1_key
 
     # ── 核心接口：build_panel ────────────────────────────────────────────────
 
@@ -204,8 +219,8 @@ class PanelBuilder:
 
         # ── 缓存路径 ──────────────────────────────────────────────────────
         if self.cache is not None:
-            key   = self._make_cache_key(factor_name, start, end, symbols)
-            panel = self.cache.get_panel(factor_name, key)
+            key, legacy_key = self._make_cache_key(factor_name, start, end, symbols)
+            panel = self.cache.get_panel(factor_name, key, legacy_key=legacy_key)
             if panel is not None:
                 return panel
 
@@ -222,7 +237,7 @@ class PanelBuilder:
         )
         elapsed = time.perf_counter() - t0
 
-        # ── 写入缓存 ──────────────────────────────────────────────────────
+        # ── 写入缓存（使用 v2 新键）──────────────────────────────────────
         if self.cache is not None and not panel.empty:
             self.cache.put_panel(factor_name, key, panel, calc_secs=elapsed)
 
@@ -260,8 +275,8 @@ class PanelBuilder:
 
         # ── 缓存路径 ──────────────────────────────────────────────────────
         if self.cache is not None:
-            key   = self._make_cache_key(cache_name, start, end, symbols)
-            panel = self.cache.get_panel(cache_name, key)
+            key, legacy_key = self._make_cache_key(cache_name, start, end, symbols)
+            panel = self.cache.get_panel(cache_name, key, legacy_key=legacy_key)
             if panel is not None:
                 return panel
 
@@ -273,7 +288,7 @@ class PanelBuilder:
         )
         elapsed = time.perf_counter() - t0
 
-        # ── 写入缓存 ──────────────────────────────────────────────────────
+        # ── 写入缓存（v2 新键）───────────────────────────────────────────
         if self.cache is not None and not panel.empty:
             self.cache.put_panel(cache_name, key, panel, calc_secs=elapsed)
 
@@ -316,8 +331,8 @@ class PanelBuilder:
         # 第一步：缓存查询
         for fn in factor_names:
             if self.cache is not None:
-                key   = self._make_cache_key(fn, start, end, symbols)
-                panel = self.cache.get_panel(fn, key)
+                key, legacy_key = self._make_cache_key(fn, start, end, symbols)
+                panel = self.cache.get_panel(fn, key, legacy_key=legacy_key)
                 if panel is not None:
                     result[fn] = panel
                     continue
@@ -337,11 +352,11 @@ class PanelBuilder:
         # 平均耗时（每个因子视为计算时间的均等份额）
         per_factor_secs = elapsed / max(len(missing), 1)
 
-        # 第三步：写入缓存
+        # 第三步：写入缓存（v2 新键）
         for fn, panel in batch.items():
             result[fn] = panel
             if self.cache is not None and not panel.empty:
-                key = self._make_cache_key(fn, start, end, symbols)
+                key, _ = self._make_cache_key(fn, start, end, symbols)
                 self.cache.put_panel(fn, key, panel, calc_secs=per_factor_secs)
 
         return result

@@ -105,6 +105,31 @@ def _print_header(title: str, cfg) -> None:
 #  mf single
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _save_manifest(pipe, cfg, factors, failures, start_time: float,
+                   out_dir: Path) -> None:
+    """
+    Generate and save run_manifest.json to *out_dir*.
+    Non-fatal: any exception is swallowed with a warning.
+    """
+    try:
+        from factor_framework.manifest import RunManifest
+        cache_info = pipe._cache.cache_info() if pipe._cache is not None else {}
+        mf = RunManifest.create(
+            factors    = list(factors),
+            cfg        = cfg,
+            cache_info = cache_info,
+            start_time = start_time,
+            failures   = list(failures),
+            stocks_dir = pipe._builder.stocks_dir,
+        )
+        out_path = out_dir / "run_manifest.json"
+        mf.save(out_path)
+        mf.print_summary()
+        print(f"  manifest → {out_path}")
+    except Exception as exc:
+        import warnings as _w
+        _w.warn(f"[manifest] 保存失败（非致命）: {exc}")
+
 def _cmd_single(args: argparse.Namespace) -> int:
     """Single-factor IC + layer-backtest screening."""
     if not args.factor:
@@ -124,6 +149,9 @@ def _cmd_single(args: argparse.Namespace) -> int:
 
     if not getattr(args, "quiet", False):
         _print_header("Multi-Factor 单因子分析  (mf single)", cfg)
+
+    import time as _time
+    _t0 = _time.perf_counter()
 
     try:
         pipe = _make_pipe(cfg)
@@ -163,6 +191,13 @@ def _cmd_single(args: argparse.Namespace) -> int:
                 _err(f"因子 {factor_name!r} 运行失败: {exc}")
                 failures.append(factor_name)
 
+        # ── Phase D: 写入 run_manifest.json ──────────────────────────────
+        _save_manifest(
+            pipe=pipe, cfg=cfg, factors=args.factor,
+            failures=failures, start_time=_t0,
+            out_dir=out_base,
+        )
+
         if failures and not results:
             return 1
         return 0
@@ -191,6 +226,9 @@ def _cmd_batch(args: argparse.Namespace) -> int:
 
     if not getattr(args, "quiet", False):
         _print_header("Multi-Factor 批量因子检验  (mf batch)", cfg)
+
+    import time as _time
+    _t0 = _time.perf_counter()
 
     try:
         import pandas as pd
@@ -241,6 +279,13 @@ def _cmd_batch(args: argparse.Namespace) -> int:
 
         n_ok = len(summaries) - len(failures)
         print(f"\n完成：{n_ok}/{len(summaries)} 个因子成功，{len(failures)} 个跳过。")
+
+        # ── Phase D: 写入 run_manifest.json ──────────────────────────────
+        _save_manifest(
+            pipe=pipe, cfg=cfg, factors=factor_list,
+            failures=failures, start_time=_t0,
+            out_dir=out_dir,
+        )
 
         return 1 if (n_ok == 0 and len(summaries) > 0) else 0
 
