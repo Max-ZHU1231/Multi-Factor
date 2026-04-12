@@ -16,8 +16,8 @@ import warnings as _warnings
 from typing import Dict, List, Optional, Tuple
 
 _warnings.warn(
-    "factor_framework.ic_analysis 已迁移至 factor_framework.analytics.ic_analysis。"
-    "旧路径将在 v4.2 移除，请更新 import。",
+    "factor_framework.ic_analysis has moved to factor_framework.analytics.ic_analysis. "
+    "The legacy import path will be removed in v4.2.",
     DeprecationWarning,
     stacklevel=2,
 )

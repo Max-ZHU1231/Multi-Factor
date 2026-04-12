@@ -1057,7 +1057,7 @@ class TestL3HoldingsLookahead:
 
         # 打印完整表格（无论通过与否，方便查阅）
         print("\n\n" + "="*80)
-        print("Layer 3 前视偏差检测结果汇总（N_LONG=270）")
+        print("Layer 3 （N_LONG=270）")
         print("="*80)
         print(table.to_string(index=False))
         print("="*80 + "\n")
@@ -1351,9 +1351,9 @@ class TestS3IcDecayPathConsistency:
         max_diff  = float(np.max(diff[non_nan_mask]))
 
         # 记录差异（S3 是记录性测试，差异存在时不强制失败，而是量化）
-        print(f"\n[S3] ic_decay vs build_return_panel（fwd={fwd}，无停牌）：")
-        print(f"     均值差={mean_diff:.4f}，最大差={max_diff:.4f}")
-        print(f"     注：build_return_panel 含 T+1 shift，ic_decay 不含，故有系统性偏移")
+        print(f"\n[S3] ic_decay vs build_return_panel（fwd={fwd}，）：")
+        print(f" ={mean_diff:.4f}，={max_diff:.4f}")
+        print(f" ：build_return_panel T+1 shift，ic_decay ，")
 
         # 两条路径定义不同（T+1 vs 无 T+1），因此允许较大差异，
         # 但差异应有规律（约等于一期收益率的量级，而非随机噪声）
@@ -1403,10 +1403,10 @@ class TestS3IcDecayPathConsistency:
         max_diff  = float(np.max(diff[valid]))
         n_diff_above_tol = int((diff[valid] > TOL).sum())
 
-        print(f"\n[S3] 停牌股 {susp_sym}（fwd={fwd}）：")
-        print(f"     均值差={mean_diff:.4f}，最大差={max_diff:.4f}")
-        print(f"     差值 > {TOL:.0e} 的日期数={n_diff_above_tol}/{valid.sum()}")
-        print(f"     结论：{'存在停牌处理差异（预期中，记录差异幅度）' if n_diff_above_tol > 0 else '停牌处理一致'}")
+        print(f"\n[S3] {susp_sym}（fwd={fwd}）：")
+        print(f" ={mean_diff:.4f}，={max_diff:.4f}")
+        print(f" > {TOL:.0e} ={n_diff_above_tol}/{valid.sum()}")
+        print(f" ：{'（，）' if n_diff_above_tol > 0 else ''}")
 
         # 记录性测试：不强制失败，但差异幅度不应超过 5 倍收益率量级
         # （超过则说明有算法错误，而不仅是定义差异）
@@ -1494,9 +1494,9 @@ class TestLookaheadBiasReport:
         from pathlib import Path
 
         print("\n\n" + "=" * 100)
-        print("前视偏差（Look-ahead Bias）完整检测报告")
-        print(f"截断参数: N_SHORT={N_SHORT}, N_MEDIUM={N_MEDIUM}, N_LONG={N_LONG}")
-        print(f"比较阈值: TOL={TOL}, WARMUP={WARMUP}")
+        print("（Look-ahead Bias）")
+        print(f": N_SHORT={N_SHORT}, N_MEDIUM={N_MEDIUM}, N_LONG={N_LONG}")
+        print(f": TOL={TOL}, WARMUP={WARMUP}")
         print("=" * 100)
 
         records = []
@@ -1584,6 +1584,6 @@ class TestLookaheadBiasReport:
 
         n_pass = (table["是否通过"] == "✓").sum()
         n_fail = (table["是否通过"] != "✓").sum()
-        print(f"总测试项: {len(table)}，通过: {n_pass}，失败: {n_fail}")
+        print(f": {len(table)}，: {n_pass}，: {n_fail}")
         print("=" * 100 + "\n")
         # 报告测试本身不 fail（仅汇总展示）

@@ -71,7 +71,7 @@ def test_get_symbols_before_first_effective(mem):
 
 def test_get_symbols_strict_raises(simple_snapshots):
     mem_strict = UniverseMembership(simple_snapshots, strict=True)
-    with pytest.raises(ValueError, match="早于最早快照"):
+    with pytest.raises(ValueError, match="earlier than the first snapshot"):
         mem_strict.get_symbols("20220101")
 
 
@@ -197,13 +197,13 @@ def test_build_date_symbol_map(mem):
 
 def test_missing_symbol_column_raises():
     bad_df = pd.DataFrame({"effective_date": ["20220701"]})
-    with pytest.raises(ValueError, match="缺少必要列"):
+    with pytest.raises(ValueError, match="missing required columns"):
         UniverseMembership(bad_df)
 
 
 def test_missing_effective_date_column_raises():
     bad_df = pd.DataFrame({"symbol": ["000001.SZ"]})
-    with pytest.raises(ValueError, match="缺少必要列"):
+    with pytest.raises(ValueError, match="missing required columns"):
         UniverseMembership(bad_df)
 
 

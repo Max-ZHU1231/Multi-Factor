@@ -63,8 +63,8 @@ try:
 except ImportError:
     _NUMBA_OK = False
     warnings.warn(
-        "[jit_ops] numba 未安装，时间序列算子将退化到 Pandas 路径。\n"
-        "安装方法：pip install numba",
+        "[jit_ops] numba is not installed; time-series operators will fall back to pandas.\n"
+        "Install via: pip install numba",
         stacklevel=2,
     )
 
@@ -74,8 +74,8 @@ try:
 except ImportError:
     _NUMEXPR_OK = False
     warnings.warn(
-        "[jit_ops] numexpr 未安装，数学算子将退化到 NumPy 路径。\n"
-        "安装方法：pip install numexpr",
+        "[jit_ops] numexpr is not installed; math operators will fall back to NumPy.\n"
+        "Install via: pip install numexpr",
         stacklevel=2,
     )
 

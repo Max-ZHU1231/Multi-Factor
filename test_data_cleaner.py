@@ -316,10 +316,10 @@ class TestRealDataSample:
         d = diagnose_df(df_raw)
         # 打印诊断摘要（pytest -v 时可见）
         if d["outlier_cols"]:
-            print(f"\n  [{csv_path.stem}] 原始极值列: {d['outlier_cols'][:5]}")
+            print(f"\n [{csv_path.stem}] : {d['outlier_cols'][:5]}")
         heavy = {k: f"{v:.1%}" for k, v in d["missing_rates"].items() if v > MISSING_HEAVY}
         if heavy:
-            print(f"\n  [{csv_path.stem}] 严重缺失列: {heavy}")
+            print(f"\n [{csv_path.stem}] : {heavy}")
 
     # ── 4-2. 清洗后：不含 MAD 极值 ────────────────────────────────────────────
     def test_no_outliers_after_clean(self, csv_path: Path):
@@ -487,9 +487,9 @@ def test_sample_summary(capsys):
     elapsed = time.time() - t0
     with capsys.disabled():
         print(f"\n{'='*65}")
-        print(f"  随机抽查汇总（{len(SAMPLE_FILES)} 只，耗时 {elapsed:.1f}s）")
+        print(f" （{len(SAMPLE_FILES)} ， {elapsed:.1f}s）")
         print(f"{'='*65}")
-        print(f"  {'文件':<20} {'状态':<12} {'无效列':>6} {'Winsor列':>8} {'行数':>7}")
+        print(f" {'':<20} {'':<12} {'':>6} {'Winsor':>8} {'':>7}")
         print(f"  {'-'*60}")
         for r in results:
             print(

@@ -78,8 +78,8 @@ class UniverseMembership:
         missing = required - set(snapshots.columns)
         if missing:
             raise ValueError(
-                f"[UniverseMembership] 快照表缺少必要列: {missing}。"
-                f" 现有列: {list(snapshots.columns)}"
+                f"[UniverseMembership] Snapshot is missing required columns: {missing}. "
+                f"Current columns: {list(snapshots.columns)}"
             )
 
         self._strict = strict
@@ -148,9 +148,9 @@ class UniverseMembership:
             # date 早于所有 effective_date
             if self._strict:
                 raise ValueError(
-                    f"[UniverseMembership] 查询日期 {date!r} 早于最早快照"
-                    f" {self._eff_dates[0]!r}，无可用成分。"
-                    f" 若允许，请传入 strict=False。"
+                    f"[UniverseMembership] Query date {date!r} is earlier than the first snapshot "
+                    f"{self._eff_dates[0]!r}; no membership is available. "
+                    f"Use strict=False to return None instead."
                 )
             return None
 
@@ -317,8 +317,8 @@ def build_membership_from_config(
 
     if mode != "topn_mktcap_dynamic":
         warnings.warn(
-            f"[build_membership_from_config] 未知 universe_mode={mode!r}，"
-            f"将按 'all' 处理。",
+            f"[build_membership_from_config] Unknown universe_mode={mode!r}; "
+            f"falling back to 'all'.",
             UserWarning,
         )
         return None
@@ -349,7 +349,7 @@ def build_membership_from_config(
 
     if cache_file.exists():
         if verbose:
-            print(f"[UniverseMembership] 加载缓存快照: {cache_file}")
+            print(f"[UniverseMembership] Loading cached snapshot: {cache_file}")
         snapshots = DynamicUniverseBuilder.load(cache_file)
     else:
         start = getattr(cfg, "start", None) or "20100101"
@@ -357,6 +357,6 @@ def build_membership_from_config(
         snapshots = builder.build(start=start, end=end, verbose=verbose)
         builder.save(snapshots, cache_file)
         if verbose:
-            print(f"[UniverseMembership] 快照已保存: {cache_file}")
+            print(f"[UniverseMembership] Snapshot saved: {cache_file}")
 
     return UniverseMembership.from_builder(snapshots)

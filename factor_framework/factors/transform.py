@@ -17,8 +17,8 @@ import warnings as _warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _warnings.warn(
-    "factor_framework.factors.transform 已迁移至 factor_framework.transform。"
-    "旧路径将在 v4.2 移除，请更新 import。",
+    "factor_framework.factors.transform has moved to factor_framework.transform. "
+    "The legacy import path will be removed in v4.2.",
     DeprecationWarning,
     stacklevel=2,
 )

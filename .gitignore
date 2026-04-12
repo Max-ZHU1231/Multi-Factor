@@ -225,3 +225,6 @@ artifacts/
 
 # cache 目录（L2 Parquet 缓存）
 cache/
+
+# output 目录（本地运行输出，不入库）
+output/

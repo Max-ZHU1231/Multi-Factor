@@ -105,7 +105,7 @@ def test_snapshot_uses_only_decision_date_data(tmp_path):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_lag_zero_raises_without_explicit_flag():
-    with pytest.raises(ValueError, match="未来函数"):
+    with pytest.raises(ValueError, match="look-ahead bias"):
         DynamicUniverseBuilder(effective_lag_days=0)
 
 

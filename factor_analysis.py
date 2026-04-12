@@ -118,7 +118,7 @@ def _save_fig(fig: plt.Figure, path: Path, dpi: int = 150) -> None:
         rel = path.resolve().relative_to(ROOT.resolve())
     except ValueError:
         rel = path
-    print(f"  ✓ 图片已保存: {rel}")
+        print(f" ✓ : {rel}")
 
 
 def _color_by_value(val: float, vmin: float, vmax: float,
@@ -155,16 +155,16 @@ def build_all_reports(cfg: dict) -> dict:
     pipe.register_builtins()
 
     print(f"\n{'='*64}")
-    print(f"  开始批量分析  共 {len(ALL_FACTORS)} 个因子")
-    print(f"  时间范围: {cfg['start']} ~ {cfg['end']}")
-    print(f"  预测期: forward={cfg['forward']} 天  分层数: {cfg['n_groups']}")
-    print(f"  模式: 批量面板预构建（一次读盘 + CSE）")
+    print(f" {len(ALL_FACTORS)} ")
+    print(f" : {cfg['start']} ~ {cfg['end']}")
+    print(f" : forward={cfg['forward']} : {cfg['n_groups']}")
+    print(f" : （ + CSE）")
     print(f"{'='*64}\n")
 
     engine = pipe.engine
 
     # ── Step 1：一次性批量构建所有因子面板（共享读盘缓存 + CSE）──────────────
-    print(f"[批量] 构建 {len(ALL_FACTORS)} 个因子面板（build_panel_batch）...")
+    print(f"[] {len(ALL_FACTORS)} （build_panel_batch）...")
     all_panels = engine.build_panel_batch(
         factor_names = ALL_FACTORS,
         start        = cfg["start"],
@@ -173,20 +173,20 @@ def build_all_reports(cfg: dict) -> dict:
         n_jobs       = cfg.get("n_jobs", 8),
     )
     succeeded = [n for n, p in all_panels.items() if not p.empty]
-    print(f"  ✓ 成功: {len(succeeded)}/{len(ALL_FACTORS)} 个因子面板已构建\n")
+    print(f" ✓ : {len(succeeded)}/{len(ALL_FACTORS)} \n")
 
     # ── Step 2：构建收益率面板（仅一次）──────────────────────────────────────
-    print(f"[批量] 构建收益率面板（forward={cfg['forward']} 天）...")
+    print(f"[] （forward={cfg['forward']} ）...")
     return_panel = engine.build_return_panel(
         forward  = cfg["forward"],
         start    = cfg["start"],
         end      = cfg["end"],
         fast_mode= True,
     )
-    print(f"  ✓ 收益率面板: {return_panel.shape}\n")
+    print(f" ✓ : {return_panel.shape}\n")
 
     # ── Step 3：构建收盘价面板（IC 衰减用，仅一次）───────────────────────────
-    print(f"[批量] 构建收盘价面板（IC 衰减）...")
+    print(f"[] （IC ）...")
     engine.register("__close__", lambda df: df["收盘价"])
     close_panel = engine.build_panel(
         "__close__",
@@ -195,7 +195,7 @@ def build_all_reports(cfg: dict) -> dict:
         fast_mode= True,
     )
     del engine._registry["__close__"]
-    print(f"  ✓ 收盘价面板: {close_panel.shape}\n")
+    print(f" ✓ : {close_panel.shape}\n")
 
     # ── Step 4：逐因子执行检验（复用已有面板，无重复读盘）─────────────────────
     valid_panels = {n: p for n, p in all_panels.items() if not p.empty}
@@ -216,8 +216,8 @@ def build_all_reports(cfg: dict) -> dict:
 
     failed = [n for n in ALL_FACTORS if n not in reports]
     if failed:
-        print(f"\n⚠ 以下因子运行失败，已跳过：{failed}")
-    print(f"\n✓ 成功完成 {len(reports)}/{len(ALL_FACTORS)} 个因子。\n")
+        print(f"\n⚠ ，：{failed}")
+        print(f"\n✓ {len(reports)}/{len(ALL_FACTORS)} 。\n")
     return reports
 
 
@@ -314,11 +314,11 @@ def build_ic_summary(reports: dict, cfg: dict) -> pd.DataFrame:
 
     # 保存 CSV
     df_sorted.to_csv(cfg["output_dir"] / "ic_summary.csv")
-    print(f"\n  ✓ IC 汇总表已保存: output/factor_analysis/ic_summary.csv")
+    print(f"\n ✓ IC : output/factor_analysis/ic_summary.csv")
 
     # ── 终端打印排名表 ──────────────────────────────────────────────────────
     print(f"\n{'─'*80}")
-    print(f"  {'排名':<4} {'因子':<24} {'均值IC':>8} {'ICIR':>7} "
+    print(f" {'':<4} {'':<24} {'IC':>8} {'ICIR':>7} "
           f"{'年化ICIR':>9} {'IC胜率':>7} {'t统计量':>8} {'NW_t':>7}")
     print(f"{'─'*80}")
     for rank, (name, row) in enumerate(df_sorted.iterrows(), 1):
@@ -491,11 +491,11 @@ def plot_layer_backtest(reports: dict, cfg: dict) -> None:
     df_ls = pd.DataFrame(all_rows).set_index("因子")
     df_ls_sorted = df_ls.sort_values("ls_夏普比率", ascending=False)
     df_ls_sorted.to_csv(cfg["output_dir"] / "layer_stats" / "all_factors_ls.csv")
-    print(f"\n  ✓ 分层回测汇总已保存: output/factor_analysis/layer_stats/all_factors_ls.csv")
+    print(f"\n ✓ : output/factor_analysis/layer_stats/all_factors_ls.csv")
 
     # 终端打印分层回测排名
     print(f"\n{'─'*76}")
-    print(f"  {'排名':<4} {'因子':<24} {'年化收益':>9} {'夏普':>7} {'最大回撤':>9} {'Calmar':>7} {'单调性':>7}")
+    print(f" {'':<4} {'':<24} {'':>9} {'':>7} {'':>9} {'Calmar':>7} {'':>7}")
     print(f"{'─'*76}")
     for rank, (name, row) in enumerate(df_ls_sorted.iterrows(), 1):
         def _f(v, fmt=".4f"):
@@ -522,13 +522,13 @@ def plot_factor_correlation(reports: dict, cfg: dict) -> pd.DataFrame:
     """
     panels = {name: rpt.factor_panel for name, rpt in reports.items()}
 
-    print(f"\n  计算因子截面相关矩阵（{len(panels)} × {len(panels)}）...")
+    print(f"\n （{len(panels)} × {len(panels)}）...")
     from factor_framework.ic_analysis import cross_factor_correlation
     corr_mat = cross_factor_correlation(panels, method="spearman")
 
     # 保存
     corr_mat.to_csv(cfg["output_dir"] / "factor_corr_matrix.csv")
-    print(f"  ✓ 相关矩阵已保存: output/factor_analysis/factor_corr_matrix.csv")
+    print(f" ✓ : output/factor_analysis/factor_corr_matrix.csv")
 
     # ── 热力图 ───────────────────────────────────────────────────────────────
     n   = len(corr_mat)
@@ -567,13 +567,13 @@ def plot_factor_correlation(reports: dict, cfg: dict) -> pd.DataFrame:
 
     if high_corr_pairs:
         high_corr_pairs.sort(key=lambda x: -abs(x[2]))
-        print(f"\n  ⚠ 高相关因子对（|r| > 0.6）：")
-        print(f"  {'因子A':<24} {'因子B':<24} {'相关系数':>8}")
+        print(f"\n ⚠ （|r| > 0.6）：")
+        print(f" {'A':<24} {'B':<24} {'':>8}")
         print(f"  {'─'*58}")
         for a, b, r in high_corr_pairs:
             print(f"  {a:<24} {b:<24} {r:>8.4f}")
     else:
-        print(f"\n  ✓ 无高相关因子对（|r| > 0.6）。")
+        print(f"\n ✓ （|r| > 0.6）。")
 
     return corr_mat
 
@@ -667,14 +667,14 @@ def plot_factor_clustering(corr_mat: pd.DataFrame, cfg: dict) -> None:
 
     # ── 打印聚类结果 ──────────────────────────────────────────────────────────
     print(f"\n  {'─'*60}")
-    print(f"  因子聚类结果（共 {cfg['n_clusters']} 类）：")
+    print(f" （ {cfg['n_clusters']} ）：")
     print(f"  {'─'*60}")
     cluster_groups: dict[int, list] = {}
     for name, cl in sorted(cluster_map.items(), key=lambda x: x[1]):
         cluster_groups.setdefault(cl, []).append(name)
     for cl in sorted(cluster_groups.keys()):
         members = "、".join(cluster_groups[cl])
-        print(f"  第 {cl} 类（{len(cluster_groups[cl])} 个因子）：{members}")
+        print(f" {cl} （{len(cluster_groups[cl])} ）：{members}")
     print(f"  {'─'*60}\n")
 
 
@@ -690,43 +690,43 @@ def main():
     # Step 0：批量运行所有因子
     reports = build_all_reports(cfg)
     if not reports:
-        print("❌ 未能生成任何因子报告，请检查数据路径和配置。")
+        print("❌ ，。")
         return
 
     print(f"\n{'='*64}")
-    print(f"  开始输出分析结果（共 {len(reports)} 个因子）")
+    print(f" （ {len(reports)} ）")
     print(f"{'='*64}")
 
     # (1) IC 时序图
-    print("\n▶ (1) 绘制单因子 IC 时序图 ...")
+    print("\n▶ (1) IC ...")
     plot_ic_timeseries(reports, cfg)
 
     # (1+) 累积 IC 对比图
-    print("\n▶     绘制累积 IC 对比曲线 ...")
+    print("\n▶ IC ...")
     plot_cumulative_ic(reports, cfg)
 
     # (2) IC 核心指标汇总
-    print("\n▶ (2) 生成核心 IC 指标汇总表 ...")
+    print("\n▶ (2) IC ...")
     ic_summary = build_ic_summary(reports, cfg)
 
     # (3) 分层回测
-    print("\n▶ (3) 绘制单因子分层回测净值图 ...")
+    print("\n▶ (3) ...")
     ls_summary = plot_layer_backtest(reports, cfg)
 
     # (4) 截面相关性
-    print("\n▶ (4) 计算因子截面相关性 ...")
+    print("\n▶ (4) ...")
     corr_mat = plot_factor_correlation(reports, cfg)
 
     # (5) 聚类分析
-    print("\n▶ (5) 执行因子聚类分析 ...")
+    print("\n▶ (5) ...")
     plot_factor_clustering(corr_mat, cfg)
 
     # ── 最终汇总 ─────────────────────────────────────────────────────────────
     print(f"\n{'='*64}")
-    print(f"  ✅ 全部分析完成！输出目录：{cfg['output_dir'].resolve()}")
+    print(f" ✅ ！：{cfg['output_dir'].resolve()}")
     print(f"{'='*64}")
 
-    print(f"\n  生成的文件清单：")
+    print(f"\n ：")
     for p in sorted(cfg["output_dir"].resolve().rglob("*")):
         if p.is_file():
             try:

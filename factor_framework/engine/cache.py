@@ -311,8 +311,8 @@ class CacheLayer:
                     return panel
                 except Exception as e:
                     warnings.warn(
-                        f"[CacheLayer] 读取 Parquet 失败 ({parquet_path}): {e}，"
-                        "已忽略缓存，将尝试旧键或重新计算。",
+                        f"[CacheLayer] Failed to read parquet ({parquet_path}): {e}. "
+                        "Cache entry ignored; trying legacy key or recomputing.",
                         stacklevel=2,
                     )
 
@@ -327,15 +327,15 @@ class CacheLayer:
                         self.last_hit_source = "legacy_key_hit"
                         self._stats["legacy_key_hit"] += 1
                         warnings.warn(
-                            f"[CacheLayer] 因子 '{factor_name}' 命中旧版缓存键（v1）。"
-                            f"建议在下次计算后删除旧缓存文件以使用 v2 键。",
+                            f"[CacheLayer] Factor '{factor_name}' hit legacy cache key (v1). "
+                            "Consider deleting legacy cache files after next run to fully migrate to v2 keys.",
                             stacklevel=2,
                         )
                         return panel
                     except Exception as e:
                         warnings.warn(
-                            f"[CacheLayer] 读取旧键 Parquet 失败 ({legacy_path}): {e}，"
-                            "将重新计算。",
+                            f"[CacheLayer] Failed to read legacy parquet ({legacy_path}): {e}. "
+                            "Will recompute.",
                             stacklevel=2,
                         )
 
@@ -374,8 +374,8 @@ class CacheLayer:
                 panel.to_parquet(parquet_path)
             except Exception as e:
                 warnings.warn(
-                    f"[CacheLayer] 写入 Parquet 失败 ({parquet_path}): {e}，"
-                    "此次计算结果仅保存在 L1 内存缓存中。",
+                    f"[CacheLayer] Failed to write parquet ({parquet_path}): {e}. "
+                    "Result is kept in L1 memory cache only for this run.",
                     stacklevel=2,
                 )
 

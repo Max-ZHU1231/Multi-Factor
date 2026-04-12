@@ -36,6 +36,10 @@ from factor_framework.analytics.ic_decay_diagnostics import (
     DiagnosticReport,
     DiagnosticResult,
 )
+from factor_framework.analytics.advanced_diagnostics import (
+    AdvancedDiagnosticsReport,
+    run_advanced_diagnostics,
+)
 
 __all__ = [
     # ic_analysis
@@ -53,4 +57,7 @@ __all__ = [
     "ICDecayDiagnostics",
     "DiagnosticReport",
     "DiagnosticResult",
+    # advanced diagnostics
+    "AdvancedDiagnosticsReport",
+    "run_advanced_diagnostics",
 ]

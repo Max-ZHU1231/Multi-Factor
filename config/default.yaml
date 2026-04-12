@@ -69,3 +69,12 @@ output:
   base_dir:       "artifacts"                        # 输出根目录
   factor_analysis: "artifacts/factor_analysis"       # 单因子分析输出
   batch:           "artifacts/batch_results"         # 批量回测输出
+
+# ── Advanced Diagnostics ─────────────────────────────────────────────────────
+advanced:
+  peer_factors: ["value_pb", "momentum_12_1", "vol_20d", "turnover_rate", "size_log_mktcap"]
+  min_cs_nobs: 20
+  corr_method: "spearman"          # spearman / pearson
+  high_corr_threshold: 0.7
+  nw_lag_rule: "t_pow_0.25"        # t_pow_0.25 / fixed_N (e.g. fixed_4)
+  enable_wide_output: true

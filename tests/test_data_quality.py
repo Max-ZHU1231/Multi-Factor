@@ -520,9 +520,9 @@ def test_real_data_quality_summary(real_results):
     """打印真实数据质量检查汇总报告。"""
     SEP = "-" * 72
     print(f"\n{'=' * 72}")
-    print(f"  数据质量检查汇总（{len(_SYMBOLS)} 只股票）")
+    print(f" （{len(_SYMBOLS)} ）")
     print(f"{'=' * 72}")
-    print(f"  {'文件':<20} {'价格跳跃':>8} {'停牌天数':>8} {'停牌率':>7} {'复权变化':>8}")
+    print(f" {'':<20} {'':>8} {'':>8} {'':>7} {'':>8}")
     print(SEP)
 
     price_fail = 0
@@ -540,7 +540,7 @@ def test_real_data_quality_summary(real_results):
             price_fail += 1
 
     print(SEP)
-    print(f"  价格跳跃异常股票数: {price_fail} / {len(_SYMBOLS)}")
+    print(f" : {price_fail} / {len(_SYMBOLS)}")
     print(f"{'=' * 72}")
     # 这里不 assert，只是汇总展示
     assert True

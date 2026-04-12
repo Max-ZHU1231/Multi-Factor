@@ -143,12 +143,12 @@ def _next_trading_day(cal: List[str], date: str, lag: int = 1) -> str:
     # 为简单起见：decision_date 本身可能不在日历（节假日），找其后第一个交易日
     # 然后再往后 lag-1 步
     if idx >= len(cal):
-        raise ValueError(f"decision_date={date!r} 超出交易日历范围。")
+        raise ValueError(f"decision_date={date!r} is out of trading-calendar range.")
     # idx 已是 date 之后第一个交易日，再加 lag-1
     eff_idx = idx + (lag - 1)
     if eff_idx >= len(cal):
         raise ValueError(
-            f"effective_date 超出交易日历末尾（decision_date={date!r}, lag={lag}）。"
+            f"effective_date exceeds trading-calendar end (decision_date={date!r}, lag={lag})."
         )
     return cal[eff_idx]
 
@@ -228,18 +228,18 @@ class DynamicUniverseBuilder:
     ) -> None:
         if metric not in _VALID_METRICS:
             raise ValueError(
-                f"metric={metric!r} 不合法，可选: {sorted(_VALID_METRICS)}"
+                f"metric={metric!r} is invalid, allowed: {sorted(_VALID_METRICS)}"
             )
         if effective_lag_days == 0 and not allow_lag_zero:
             raise ValueError(
-                "effective_lag_days=0 意味着 T 日决策 T 日生效，可能引入未来函数。\n"
-                "若确认无误，请传入 allow_lag_zero=True。"
+                "effective_lag_days=0 means same-day decision/effective date and may introduce look-ahead bias.\n"
+                "If intentional, set allow_lag_zero=True."
             )
         if rebalance_freq not in _FREQ_MONTHS and rebalance_months is None:
             raise ValueError(
-                f"rebalance_freq={rebalance_freq!r} 不合法，"
-                f"可选: {list(_FREQ_MONTHS.keys())}，"
-                f"或通过 rebalance_months 显式指定。"
+                f"rebalance_freq={rebalance_freq!r} is invalid, "
+                f"allowed: {list(_FREQ_MONTHS.keys())}, "
+                f"or specify rebalance_months explicitly."
             )
 
         self.stocks_dir        = Path(stocks_dir)
@@ -365,7 +365,7 @@ class DynamicUniverseBuilder:
         if mktcap.empty:
             warnings.warn(
                 f"[DynamicUniverseBuilder] decision_date={decision_date!r} "
-                f"无有效市值数据，该快照为空。",
+                f"has no valid market-cap data; snapshot is empty.",
                 RuntimeWarning,
             )
             return pd.DataFrame(
@@ -430,14 +430,14 @@ class DynamicUniverseBuilder:
             else:
                 decision_dates = [start]
             warnings.warn(
-                f"[DynamicUniverseBuilder] 在 [{start}, {end}] 内未找到调仓点，"
-                f"使用 {decision_dates[0]!r} 作为唯一快照。",
+                f"[DynamicUniverseBuilder] No rebalance date found in [{start}, {end}], "
+                f"using {decision_dates[0]!r} as the only snapshot.",
                 RuntimeWarning,
             )
 
         if verbose:
-            print(f"[DynamicUniverseBuilder] 构建 {len(decision_dates)} 个快照"
-                  f"（top={self.top_n}, metric={self.metric}）")
+            print(f"[DynamicUniverseBuilder] Building {len(decision_dates)} snapshots "
+                  f"(top={self.top_n}, metric={self.metric})")
 
         frames: list[pd.DataFrame] = []
         for i, dd in enumerate(decision_dates):
@@ -445,7 +445,7 @@ class DynamicUniverseBuilder:
                 print(f"  [{i+1}/{len(decision_dates)}] decision_date={dd} ...", end=" ")
             snap = self.build_snapshot(dd)
             if verbose:
-                print(f"{len(snap)} 只")
+                print(f"{len(snap)} symbols")
             frames.append(snap)
 
         if not frames:

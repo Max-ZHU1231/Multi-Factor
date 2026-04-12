@@ -18,8 +18,8 @@ import warnings
 from typing import Dict, List, Optional
 
 _warnings.warn(
-    "factor_framework.neutralize 已迁移至 factor_framework.transform.neutralize。"
-    "旧路径将在 v4.2 移除，请更新 import。",
+    "factor_framework.neutralize has moved to factor_framework.transform.neutralize. "
+    "The legacy import path will be removed in v4.2.",
     DeprecationWarning,
     stacklevel=2,
 )

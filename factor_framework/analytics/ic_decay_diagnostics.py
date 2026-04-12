@@ -200,7 +200,7 @@ class _ProgressBar:
                 f"{self.total}/{self.total} {self.unit}  elapsed {ela}   ",
                 flush=True,
             )
-            print()           # 换行，防止下一条覆盖
+            print()           # newline before next message
         else:
             pad = " " * self.indent
             msg = f"{pad}[完成] {self.desc}  {self.total} {self.unit}  elapsed {ela}"
@@ -268,12 +268,12 @@ class _ModuleProgress:
             idx = self.module_ids.index(mid) + 1
             ela = self._fmt_sec(time.monotonic() - self._t0)
             print(
-                f"  [M{mid}/{self.total}] {name} ...  (总耗时 {ela})",
+                f"  [M{mid}/{self.total}] {name} ...  (total elapsed {ela})",
                 flush=True,
             )
         else:
             idx = self.module_ids.index(mid) + 1
-            print(f"  [M{mid}] {name} 开始", flush=True)
+            print(f"  [M{mid}] {name} start", flush=True)
 
     def end_module(self, mid: int, status: str) -> None:
         self._done += 1
@@ -285,18 +285,18 @@ class _ModuleProgress:
             # 覆盖同一行：在 begin_module 之后再打印结果行
             print(
                 f"  [M{mid}] {name:18s}  {status}  ({mod_ela})"
-                f"  [{self._done}/{self.total} 完成, 总耗时 {total_ela}]",
+                f"  [{self._done}/{self.total} done, total elapsed {total_ela}]",
                 flush=True,
             )
         else:
             print(
-                f"  [M{mid}] {name}  {status}  耗时 {mod_ela}",
+                f"  [M{mid}] {name}  {status}  elapsed {mod_ela}",
                 flush=True,
             )
 
     def summary(self) -> None:
         total_ela = self._fmt_sec(time.monotonic() - self._t0)
-        print(f"\n  诊断完成  总耗时 {total_ela}", flush=True)
+        print(f"\n  Diagnostics completed  total elapsed {total_ela}", flush=True)
 
 
 # ── 便捷工厂函数 ──────────────────────────────────────────────────────────────
@@ -657,15 +657,15 @@ class DiagnosticResult:
     def print(self) -> None:
         sep = "-" * 64
         status = self.status_str()
-        risk   = f"[风险:{self.risk_level}]"
+        risk   = f"[risk:{self.risk_level}]"
         print(f"\n{sep}")
         print(f"  Module {self.module_id}: {self.module_name}  {status}  {risk}")
         print(sep)
-        print(f"  结论: {self.conclusion}")
+        print(f"  Conclusion: {self.conclusion}")
         if isinstance(self.evidence, pd.DataFrame):
-            print(f"\n  证据:\n{self.evidence.to_string()}")
+            print(f"\n  Evidence:\n{self.evidence.to_string()}")
         elif isinstance(self.evidence, dict):
-            print(f"\n  证据:")
+            print(f"\n  Evidence:")
             for k, v in self.evidence.items():
                 if isinstance(v, float):
                     print(f"    {k}: {v:.6f}")
@@ -698,10 +698,10 @@ class DiagnosticReport:
     def print_full(self) -> None:
         sep = "=" * 64
         print(f"\n{sep}")
-        print(f"  IC 衰减异常诊断报告  因子: {self.factor_name or '(未命名)'}")
+        print(f"  IC Decay Diagnostics Report  Factor: {self.factor_name or '(unnamed)'}")
         print(sep)
         # 汇总表
-        print(f"\n{'模块':<6} {'名称':<30} {'状态':<8} {'风险':<10}")
+        print(f"\n{'Module':<6} {'Name':<30} {'Status':<8} {'Risk':<10}")
         print("-" * 60)
         for r in self.results:
             print(f"  M{r.module_id:<4} {r.module_name:<30} {r.status_str():<8} {r.risk_level:<10}")
@@ -721,24 +721,24 @@ class DiagnosticReport:
         high_risk = [r for r in self.results if r.risk_level == "HIGH"]
 
         if len(fails) == 0:
-            verdict = "真实中期有效（所有模块通过）"
+            verdict = "Genuine medium-horizon efficacy (all modules passed)"
             risk = "LOW"
         elif any(r.module_id in (1, 2) for r in fails):
-            verdict = "实现偏差（时间对齐/累计统计问题，需修复后复测）"
+            verdict = "Implementation bias (time alignment/cumulative stats issue; fix and re-test)"
             risk = "HIGH"
         elif len(fails) >= 3:
-            verdict = "多因素混合偏差（建议逐一修复后复测）"
+            verdict = "Multi-source bias (fix issues module by module and re-test)"
             risk = "HIGH"
         elif len(high_risk) > 0:
-            verdict = "结构暴露驱动（中性化后结论需重新评估）"
+            verdict = "Driven by structural exposure (re-evaluate after neutralization)"
             risk = "MEDIUM"
         else:
-            verdict = "部分合理（低风险模块通过，建议进一步分析）"
+            verdict = "Partially plausible (low-risk modules passed; further analysis recommended)"
             risk = "MEDIUM"
 
-        print(f"  最终判定: [{risk}] {verdict}")
-        print(f"  通过模块: {sum(1 for r in self.results if r.passed is True)} / {len(self.results)}")
-        print(f"  失败模块: {[f'M{r.module_id}' for r in fails]}")
+        print(f"  Final Verdict: [{risk}] {verdict}")
+        print(f"  Passed Modules: {sum(1 for r in self.results if r.passed is True)} / {len(self.results)}")
+        print(f"  Failed Modules: {[f'M{r.module_id}' for r in fails]}")
         print("=" * 64)
 
     def to_dict(self) -> Dict:
@@ -1136,7 +1136,7 @@ class ICDecayDiagnostics:
 
         rows = []
         _pb3 = _make_pbar(
-            total=len(self.forward_list), desc="M3 中性化版本",
+            total=len(self.forward_list), desc="M3 neutralized variants",
             unit="fwd", indent=6, log_every=0,
         )
         for fwd in self.forward_list:
@@ -1545,14 +1545,14 @@ class ICDecayDiagnostics:
             if np.isnan(halflife_days) or np.isnan(ic_at_max):
                 passed     = None
                 risk_level = "UNKNOWN"
-                conclusion = "数据不足，无法估算因子半衰期。"
+                conclusion = "Insufficient data to estimate factor half-life."
             elif halflife_days >= 60:
                 passed     = True
                 risk_level = "LOW"
                 conclusion = (
-                    f"缓变因子：自相关半衰期约 {halflife_months:.1f} 个月"
-                    f"（≈{halflife_days:.0f} 交易日），"
-                    f"forward 较长时 IC 较高属于合理特性。"
+                    f"Slow-varying factor: autocorrelation half-life is about {halflife_months:.1f} months "
+                    f"(~{halflife_days:.0f} trading days); "
+                    f"higher IC at longer forward horizons is plausible."
                 )
             elif halflife_days < 21 and not np.isnan(ic_at_mid) and not np.isnan(ic_at_max):
                 ic_ratio = abs(ic_at_max) / abs(ic_at_mid) if ic_at_mid != 0 else np.inf
@@ -1560,34 +1560,33 @@ class ICDecayDiagnostics:
                     passed     = False
                     risk_level = "MEDIUM"
                     conclusion = (
-                        f"因子半衰期较短（约 {halflife_days:.0f} 交易日），"
-                        f"但增量 IC(k={fwd_max}) = {ic_at_max:.4f} 仍显著高于 "
-                        f"IC(k={fwd_mid}) = {ic_at_mid:.4f}（比例={ic_ratio:.2f}），"
-                        f"与因子时效性不匹配，需结合模块1、2结论综合判断。"
+                        f"Short half-life (~{halflife_days:.0f} trading days), "
+                        f"but incremental IC(k={fwd_max}) = {ic_at_max:.4f} is still significantly higher than "
+                        f"IC(k={fwd_mid}) = {ic_at_mid:.4f} (ratio={ic_ratio:.2f}); "
+                        f"this is inconsistent with expected factor timeliness and should be cross-checked with Modules 1 and 2."
                     )
                 else:
                     passed     = True
                     risk_level = "LOW"
                     conclusion = (
-                        f"因子半衰期约 {halflife_days:.0f} 交易日，"
-                        f"增量 IC 在长 forward 的衰减与半衰期基本一致。"
+                        f"Factor half-life is about {halflife_days:.0f} trading days; "
+                        f"incremental IC decay at longer forward horizons is broadly consistent with this half-life."
                     )
             else:
                 passed     = None
                 risk_level = "MEDIUM"
                 conclusion = (
-                    f"因子半衰期约 {halflife_months:.1f} 个月"
-                    f"（≈{halflife_days:.0f} 交易日），"
-                    f"中等时效性，建议结合模块1~4综合判断。"
+                    f"Factor half-life is about {halflife_months:.1f} months (~{halflife_days:.0f} trading days); "
+                    f"medium timeliness, recommend combining evidence from Modules 1-4."
                 )
         except Exception as e:
             passed     = None
             risk_level = "UNKNOWN"
-            conclusion = f"判断过程出错: {e}"
+            conclusion = f"Error while deriving conclusion: {e}"
 
         return DiagnosticResult(
             module_id   = 5,
-            module_name = "因子属性验证（时效性/半衰期）",
+            module_name = "Factor Property Validation (Timeliness/Half-life)",
             passed      = passed,
             evidence    = evidence,
             conclusion  = conclusion,
@@ -1625,8 +1624,8 @@ class ICDecayDiagnostics:
         split_results = []
 
         _pb6a = _make_pbar(
-            total=n_splits, desc="M6 子期分割",
-            unit="子期", indent=6, log_every=0,
+            total=n_splits, desc="M6 split-period",
+            unit="split", indent=6, log_every=0,
         )
         for i in range(n_splits):
             s_start = i * split_size
@@ -1680,8 +1679,8 @@ class ICDecayDiagnostics:
         winsor_configs = [(1.5, "strict"), (3.0, "standard"), (5.0, "loose")]
         winsor_rows = []
         _pb6b = _make_pbar(
-            total=len(winsor_configs), desc="M6 Winsorize扰动",
-            unit="级", indent=6, log_every=0,
+            total=len(winsor_configs), desc="M6 winsorize-perturbation",
+            unit="level", indent=6, log_every=0,
         )
         for n_mads, label in winsor_configs:
             f_win = _winsorize_mad(self.factor_panel.copy(), n_mads)
@@ -1768,7 +1767,7 @@ class ICDecayDiagnostics:
             if len(existing_cols) < 2:
                 passed     = None
                 risk_level = "UNKNOWN"
-                conclusion = "子期划分后样本不足，无法判断稳健性。"
+                conclusion = "Insufficient samples after split-period partitioning; robustness is inconclusive."
             else:
                 # 对每个子期检查是否 forward 越长 IC 越高（单调性）
                 monotone_count = 0
@@ -1793,33 +1792,33 @@ class ICDecayDiagnostics:
                     passed     = True
                     risk_level = "LOW"
                     conclusion = (
-                        f"结论稳健：{monotone_count}/{len(split_df)} 个子期均呈现 "
-                        f"forward 越长 IC 越高的形态。"
-                        + (f" 注：Winsorize 阈值变化导致 IC 差异较大（>{0.02:.2%}），建议关注。"
+                        f"Robust conclusion: {monotone_count}/{len(split_df)} split periods show "
+                        f"higher IC at longer forward horizons."
+                        + (f" Note: IC is sensitive to winsorize threshold changes (>{0.02:.2%}); review recommended."
                            if winsor_sensitive else "")
                     )
                 elif ratio <= 1 / 3:
                     passed     = False
                     risk_level = "MEDIUM"
                     conclusion = (
-                        f"结论不稳健：仅 {monotone_count}/{len(split_df)} 个子期呈现 "
-                        f"forward 越长 IC 越高的形态，该现象依赖特定时间段。"
+                        f"Non-robust conclusion: only {monotone_count}/{len(split_df)} split periods show "
+                        f"higher IC at longer forward horizons; this appears regime-dependent."
                     )
                 else:
                     passed     = None
                     risk_level = "MEDIUM"
                     conclusion = (
-                        f"结论部分稳健：{monotone_count}/{len(split_df)} 个子期呈现单调上升，"
-                        f"结论有条件成立（需关注市场状态）。"
+                        f"Partially robust conclusion: {monotone_count}/{len(split_df)} split periods show monotonic rise; "
+                        f"validity is conditional on market regime."
                     )
         except Exception as e:
             passed     = None
             risk_level = "UNKNOWN"
-            conclusion = f"判断过程出错: {e}"
+            conclusion = f"Error while deriving conclusion: {e}"
 
         return DiagnosticResult(
             module_id   = 6,
-            module_name = "稳健性复核",
+            module_name = "Robustness Recheck",
             passed      = passed,
             evidence    = evidence,
             conclusion  = conclusion,
@@ -1876,7 +1875,7 @@ class ICDecayDiagnostics:
                 r = module_fns[mid]()
                 status = r.status_str()
             except Exception as exc:
-                warnings.warn(f"Module {mid} 运行失败: {exc}")
+                warnings.warn(f"Module {mid} failed: {exc}")
                 r = DiagnosticResult(
                     module_id   = mid,
                     module_name = {1: "时间对齐", 2: "累计窗口", 3: "暴露剥离",

@@ -160,7 +160,7 @@ def test_old_schema_version_warns_and_upgrades():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         upgraded = upgrade_config(d)
-    assert any("低于最低支持版本" in str(x.message) or
+    assert any("below minimum supported version" in str(x.message) or
                "0.1" in str(x.message) for x in w), \
         "过旧版本应触发 UserWarning"
     assert upgraded["schema_version"] == CURRENT_SCHEMA_VERSION
@@ -175,7 +175,7 @@ def test_future_schema_version_warns_and_downgrades():
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         upgraded = upgrade_config(d)
-    assert any("高于当前代码版本" in str(x.message) or
+    assert any("newer than current code version" in str(x.message) or
                "99.0" in str(x.message) for x in w), \
         "未来版本应触发 UserWarning"
     assert upgraded["schema_version"] == CURRENT_SCHEMA_VERSION
@@ -187,7 +187,7 @@ def test_future_schema_version_warns_and_downgrades():
 
 def test_invalid_schema_version_format_raises():
     d = {"factor_name": "f", "schema_version": "not-a-version"}
-    with pytest.raises(ValueError, match="schema_version 格式非法"):
+    with pytest.raises(ValueError, match="Invalid schema_version format"):
         upgrade_config(d)
 
 

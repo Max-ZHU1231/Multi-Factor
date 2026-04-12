@@ -110,14 +110,14 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="多因子全量分析（新主路径，消费 config/default.yaml）"
     )
-    p.add_argument("--config",   default=None,       help="用户 YAML 配置文件路径")
-    p.add_argument("--start",    default=None,        help="开始日期 YYYYMMDD")
-    p.add_argument("--end",      default=None,        help="结束日期 YYYYMMDD")
-    p.add_argument("--forward",  type=int, default=None, help="预测期（交易日）")
-    p.add_argument("--n-groups", type=int, default=None, dest="n_groups", help="分层数")
-    p.add_argument("--output",   default=None,        help="输出目录覆盖")
-    p.add_argument("--no-cache", action="store_true", help="禁用 L2 磁盘缓存")
-    p.add_argument("--show-config", action="store_true", help="打印有效配置后退出")
+ p.add_argument("--config", default=None, help=" YAML ")
+ p.add_argument("--start", default=None, help=" YYYYMMDD")
+ p.add_argument("--end", default=None, help=" YYYYMMDD")
+ p.add_argument("--forward", type=int, default=None, help="（）")
+ p.add_argument("--n-groups", type=int, default=None, dest="n_groups", help="")
+ p.add_argument("--output", default=None, help="")
+ p.add_argument("--no-cache", action="store_true", help=" L2 ")
+ p.add_argument("--show-config", action="store_true", help="")
     return p.parse_args()
 
 
@@ -137,20 +137,20 @@ def main() -> None:
     cfg = load_config(user_config=args.config, overrides=overrides)
 
     if args.show_config:
-        print("\n【有效配置】")
+        print("\n【】")
         print_config(cfg)
         return
 
     # ── 3. 参数回显 ──────────────────────────────────────────────────────────
     print("\n" + "=" * 64)
-    print("  Multi-Factor 全量因子分析  (v3.3 新主路径)")
+    print(" Multi-Factor (v3.3 )")
     print("=" * 64)
-    print(f"  数据目录  : {cfg.data.stocks_dir}")
-    print(f"  时间范围  : {cfg.backtest.start} ~ {cfg.backtest.end}")
-    print(f"  预测期    : {cfg.backtest.forward} 天")
-    print(f"  分层数    : {cfg.backtest.n_groups}")
-    print(f"  缓存目录  : {cfg.cache.cache_dir}")
-    print(f"  输出目录  : {cfg.output.factor_analysis}")
+    print(f" : {cfg.data.stocks_dir}")
+    print(f" : {cfg.backtest.start} ~ {cfg.backtest.end}")
+    print(f" : {cfg.backtest.forward} ")
+    print(f" : {cfg.backtest.n_groups}")
+    print(f" : {cfg.cache.cache_dir}")
+    print(f" : {cfg.output.factor_analysis}")
     print("=" * 64 + "\n")
 
     # ── 4. 将配置转为 factor_analysis.py 兼容的 CFG dict ───────────────────

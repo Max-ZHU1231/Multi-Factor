@@ -125,20 +125,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="全量因子检验：28 个内置因子 IC 分析 + 分层回测横向对比"
     )
-    parser.add_argument("--config",     default=None, help="用户 YAML 配置文件路径")
-    parser.add_argument("--start",      default=None, help="开始日期 YYYYMMDD")
-    parser.add_argument("--end",        default=None, help="结束日期 YYYYMMDD")
-    parser.add_argument("--forward",    type=int, default=None, help="预测期（天），默认 21")
+    parser.add_argument("--config", default=None, help=" YAML ")
+    parser.add_argument("--start", default=None, help=" YYYYMMDD")
+    parser.add_argument("--end", default=None, help=" YYYYMMDD")
+    parser.add_argument("--forward", type=int, default=None, help="（）， 21")
     parser.add_argument("--n-groups",   type=int, default=None, dest="n_groups")
     parser.add_argument("--category",   default=None,
-                        help="只检验某类因子（momentum/volatility/value/size/volume/liquidity/technical）")
+ help="（momentum/volatility/value/size/volume/liquidity/technical）")
     parser.add_argument("--max-stocks", type=int, default=None, dest="max_stocks",
-                        help="最多使用多少只股票（按文件名排序截取，用于快速测试）")
-    parser.add_argument("--no-cache",   action="store_true", help="禁用 L2 磁盘缓存")
-    parser.add_argument("--output",     default=None, help="输出目录覆盖")
+ help="（，）")
+ parser.add_argument("--no-cache", action="store_true", help=" L2 ")
+ parser.add_argument("--output", default=None, help="")
     parser.add_argument("--log-file",   default=None, dest="log_file",
-                        help="将输出同时写入此日志文件（UTF-8）")
-    parser.add_argument("--show-config",action="store_true", help="打印配置后退出")
+ help="（UTF-8）")
+ parser.add_argument("--show-config",action="store_true", help="")
     args = parser.parse_args()
 
     # ── 可选：把 stdout 同时写到 log file（Tee）────────────────────────────
@@ -182,19 +182,19 @@ def main() -> None:
     # ── 打印标题 ──────────────────────────────────────────────────────────────
     DIVIDER = "=" * 72
     print(f"\n{DIVIDER}")
-    print("    Multi-Factor 全量因子检验报告")
+    print(" Multi-Factor ")
     print(DIVIDER)
-    print(f"  数据目录  : {ROOT / cfg.data.stocks_dir}")
-    print(f"  时间范围  : {cfg.backtest.start} ~ {cfg.backtest.end}")
-    print(f"  预测期    : {cfg.backtest.forward} 天（月度调仓）")
-    print(f"  分层数    : {cfg.backtest.n_groups}")
-    print(f"  IC 方法   : {cfg.ic.method}")
-    print(f"  预处理    : winsorize={cfg.preprocess.winsorize}"
+    print(f" : {ROOT / cfg.data.stocks_dir}")
+    print(f" : {cfg.backtest.start} ~ {cfg.backtest.end}")
+    print(f" : {cfg.backtest.forward} （）")
+    print(f" : {cfg.backtest.n_groups}")
+    print(f" IC : {cfg.ic.method}")
+    print(f" : winsorize={cfg.preprocess.winsorize}"
           f"  standardize={cfg.preprocess.standardize}"
           f"  neutralize={cfg.preprocess.neutralize}")
-    print(f"  年化期数  : {cfg.backtest.periods_per_year}  rf={cfg.backtest.rf}")
-    print(f"  缓存目录  : {cfg.cache.cache_dir}")
-    print(f"  输出目录  : {out_dir}")
+          print(f" : {cfg.backtest.periods_per_year} rf={cfg.backtest.rf}")
+          print(f" : {cfg.cache.cache_dir}")
+          print(f" : {out_dir}")
     print(DIVIDER + "\n")
 
     # ── 初始化 Pipeline ───────────────────────────────────────────────────────
@@ -217,12 +217,12 @@ def main() -> None:
         _orig_glob = stocks_dir_path.glob
         _limited   = all_csvs
         pipe.engine._stock_paths_override = _limited
-        print(f"  [快速模式] 限制为 {len(_limited)} 只股票\n")
+        print(f" [] {len(_limited)} \n")
 
     # ── 确定待检验因子列表 ────────────────────────────────────────────────────
     factor_names = _get_factor_list(args.category)
     n_total      = len(factor_names)
-    print(f"  待检验因子: {n_total} 个\n")
+    print(f" : {n_total} \n")
 
     # ── 逐因子运行 ────────────────────────────────────────────────────────────
     summaries    : list[dict] = []
@@ -270,18 +270,18 @@ def main() -> None:
             ls_sr   = s.get("ls_sharpe",float("nan"))
             print(f"  Mean IC={mean_ic:+.4f}  ICIR={icir:+.3f}  "
                   f"Win={win_r:.1%}  多空年化={ls_ret:+.1%}  夏普={ls_sr:.2f}")
-            print(f"  评级: {s['grade']}   耗时: {s['elapsed_s']}s")
+                  print(f" : {s['grade']} : {s['elapsed_s']}s")
 
         except Exception as exc:
             elapsed = round(time.time() - t0, 1)
-            print(f"  [错误] {exc}  ({elapsed}s)")
+            print(f" [] {exc} ({elapsed}s)")
             failed.append((name, str(exc)))
 
     total_elapsed = time.time() - t_start_all
 
     # ── 汇总表输出 ────────────────────────────────────────────────────────────
     if not summaries:
-        print("\n[警告] 没有任何因子成功完成检验。")
+        print("\n[] 。")
         return
 
     df = pd.DataFrame(summaries)
@@ -310,7 +310,7 @@ def main() -> None:
     }
 
     print(f"\n\n{'═'*72}")
-    print("    全量因子检验汇总（按 |Mean IC| 降序）")
+    print(" （ |Mean IC| ）")
     print(f"{'═'*72}")
 
     # 按类别分组打印
@@ -340,7 +340,7 @@ def main() -> None:
     pd.set_option("display.max_rows", 50)
 
     print(f"\n\n{'─'*72}")
-    print("  数值汇总表（所有因子）")
+    print(" （）")
     print(f"{'─'*72}")
     print(df_display.to_string())
 
@@ -348,33 +348,33 @@ def main() -> None:
     if "grade" in df.columns:
         grade_counts = df["grade"].value_counts()
         print(f"\n\n{'─'*72}")
-        print("  因子评级分布")
+        print(" ")
         print(f"{'─'*72}")
         for grade_label, cnt in grade_counts.items():
-            print(f"  {grade_label} : {cnt} 个")
+            print(f" {grade_label} : {cnt} ")
 
     # ── 失败记录 ──────────────────────────────────────────────────────────────
     if failed:
         print(f"\n\n{'─'*72}")
-        print(f"  以下 {len(failed)} 个因子运行失败：")
+        print(f" {len(failed)} ：")
         for fname, err in failed:
-            print(f"  [跳过] {fname}: {err}")
+            print(f" [] {fname}: {err}")
 
     # ── 保存 CSV ──────────────────────────────────────────────────────────────
     csv_path = out_dir / "factor_screening_summary.csv"
     df.to_csv(csv_path, encoding="utf-8-sig")
-    print(f"\n\n✓ 完整汇总表已保存：{csv_path}")
+    print(f"\n\n✓ ：{csv_path}")
 
     # 保存排行榜（只保留关键列）
     rank_cols = ["category", "display_name"] + [c for c in col_map if c in df.columns] + ["grade", "elapsed_s"]
     rank_df = df[[c for c in rank_cols if c in df.columns]].rename(columns=col_map)
     rank_csv = out_dir / "factor_ranking.csv"
     rank_df.to_csv(rank_csv, encoding="utf-8-sig")
-    print(f"✓ 因子排行榜已保存：{rank_csv}")
+    print(f"✓ ：{rank_csv}")
 
     print(f"\n{'='*72}")
-    print(f"  全部完成！共 {len(summaries)} 个因子成功，{len(failed)} 个失败")
-    print(f"  总耗时: {total_elapsed/60:.1f} 分钟")
+    print(f" ！ {len(summaries)} ，{len(failed)} ")
+    print(f" : {total_elapsed/60:.1f} ")
     print(f"{'='*72}\n")
 
 

@@ -11,8 +11,8 @@ factor_framework.factors.layer_backtester  [v4.0 COMPATIBILITY SHIM]
 from __future__ import annotations
 import warnings as _warnings
 _warnings.warn(
-    "factor_framework.factors.layer_backtester 已迁移至 factor_framework.analytics。"
-    "旧路径将在 v4.2 移除，请更新 import。",
+    "factor_framework.factors.layer_backtester has moved to factor_framework.analytics. "
+    "The legacy import path will be removed in v4.2.",
     DeprecationWarning,
     stacklevel=2,
 )
@@ -167,19 +167,19 @@ class LayerBacktester:
         """打印格式化分层回测摘要。"""
         self._check_ran()
         s = self.summary()
-        header = f"── 分层回测摘要 {'[' + factor_name + ']' if factor_name else ''} ──"
+        header = f"── Layer Backtest Summary {'[' + factor_name + ']' if factor_name else ''} ──"
         print(header)
-        print(f"  多空年化收益   : {s.get('ls_annual_return', float('nan')):.2%}")
-        print(f"  多空夏普比率   : {s.get('ls_sharpe', float('nan')):.4f}")
-        print(f"  最大回撤       : {s.get('ls_max_drawdown', float('nan')):.2%}")
-        print(f"  Calmar 比率    : {s.get('ls_calmar', float('nan')):.4f}")
-        print(f"  胜率           : {s.get('ls_win_rate', float('nan')):.2%}")
-        print(f"  单调性得分     : {s.get('monotone_score', float('nan')):.4f}")
-        print(f"  平均换手率     : {s.get('avg_turnover', float('nan')):.2%}")
-        print(f"  平均交易成本   : {s.get('avg_cost', float('nan')):.4f}")
+        print(f"  LS Annual Return : {s.get('ls_annual_return', float('nan')):.2%}")
+        print(f"  LS Sharpe        : {s.get('ls_sharpe', float('nan')):.4f}")
+        print(f"  Max Drawdown     : {s.get('ls_max_drawdown', float('nan')):.2%}")
+        print(f"  Calmar Ratio     : {s.get('ls_calmar', float('nan')):.4f}")
+        print(f"  Win Rate         : {s.get('ls_win_rate', float('nan')):.2%}")
+        print(f"  Monotone Score   : {s.get('monotone_score', float('nan')):.4f}")
+        print(f"  Avg Turnover     : {s.get('avg_turnover', float('nan')):.2%}")
+        print(f"  Avg Trading Cost : {s.get('avg_cost', float('nan')):.4f}")
 
     def __repr__(self) -> str:
-        status = "已运行" if self._ran else "未运行（调用 .run()）"
+        status = "ran" if self._ran else "not-ran (call .run())"
         return (
             f"LayerBacktester(n_groups={self.n_groups}, "
             f"direction={self.direction}, "

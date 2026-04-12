@@ -64,6 +64,14 @@ def _lazy_diagnostics():
     return ICDecayDiagnostics, DiagnosticReport
 
 
+def _lazy_advanced_diagnostics():
+    from factor_framework.analytics.advanced_diagnostics import (
+        run_advanced_diagnostics,
+        AdvancedDiagnosticsReport,
+    )
+    return run_advanced_diagnostics, AdvancedDiagnosticsReport
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 工具函数
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -123,6 +131,24 @@ def _resample_monthly(
     return f_m.loc[valid], r_m.loc[valid]
 
 
+def _resample_panel_monthly(panel: pd.DataFrame) -> pd.DataFrame:
+    """Resample a single panel to month-end using last valid row."""
+    if panel is None or panel.empty:
+        return panel
+    p = panel.copy()
+    if not pd.api.types.is_datetime64_any_dtype(p.index):
+        try:
+            p.index = pd.to_datetime(p.index, format="%Y%m%d")
+        except Exception:
+            p.index = pd.to_datetime(p.index)
+    try:
+        p_m = p.resample("ME").last()
+    except Exception:
+        p_m = p.resample("M").last()
+    p_m.index = p_m.index.strftime("%Y%m%d")
+    return p_m.dropna(how="all")
+
+
 def _save_diag_report(report: object, out_dir: Path) -> None:
     """
     将 DiagnosticReport 的所有证据保存为标准化 CSV + JSON。
@@ -159,19 +185,19 @@ def _save_diag_report(report: object, out_dir: Path) -> None:
         })
     pd.DataFrame(overview_rows).to_csv(out_dir / "diagnostic_overview.csv", index=False)
 
-    # ── 最终判定 JSON ─────────────────────────────────────────────────────────
+    # ── final verdict JSON ───────────────────────────────────────────────────
     fails = [r for r in report.results if r.passed is False]
     high_risk = [r for r in report.results if r.risk_level == "HIGH"]
     if len(fails) == 0:
-        verdict, risk = "真实中期有效（所有模块通过）", "LOW"
+        verdict, risk = "Genuine medium-horizon efficacy (all modules passed)", "LOW"
     elif any(r.module_id in (1, 2) for r in fails):
-        verdict, risk = "实现偏差（时间对齐/累计统计问题）", "HIGH"
+        verdict, risk = "Implementation bias (time alignment / cumulative stats issue)", "HIGH"
     elif len(fails) >= 3:
-        verdict, risk = "多因素混合偏差", "HIGH"
+        verdict, risk = "Multi-source bias", "HIGH"
     elif high_risk:
-        verdict, risk = "结构暴露驱动", "MEDIUM"
+        verdict, risk = "Driven by structural exposure", "MEDIUM"
     else:
-        verdict, risk = "部分合理（建议进一步分析）", "MEDIUM"
+        verdict, risk = "Partially plausible (further analysis recommended)", "MEDIUM"
 
     final = {
         "factor_name":   report.factor_name,
@@ -216,9 +242,9 @@ def _save_diag_report(report: object, out_dir: Path) -> None:
                 elif isinstance(ev, pd.Series):
                     ev.to_frame().to_csv(out_dir / filename)
             except Exception as _exc:
-                warnings.warn(f"[diagnostics] 保存 {filename} 失败: {_exc}")
+                warnings.warn(f"[diagnostics] Failed to save {filename}: {_exc}")
 
-    print(f"[OK] IC 衰减诊断报告已保存至 {out_dir}/")
+    print(f"[OK] IC decay diagnostics report saved to {out_dir}/")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -262,6 +288,7 @@ class FactorReport:
         self.industry_map = industry_map
         # 诊断报告（运行后缓存，避免重复计算）
         self._diag_report: Optional[object] = None  # DiagnosticReport | None
+        self._advanced_report: Optional[object] = None  # AdvancedDiagnosticsReport | None
 
     # ── IC 衰减诊断 ───────────────────────────────────────────────────────────
 
@@ -294,9 +321,9 @@ class FactorReport:
         """
         if self.price_panel is None:
             raise ValueError(
-                "run_ic_diagnostics() 需要 price_panel。\n"
-                "请使用 pipe.run(..., run_ic_decay_diagnostics=True) 或手动赋值 "
-                "report.price_panel = price_df 后再调用。"
+                "run_ic_diagnostics() requires price_panel.\n"
+                "Use pipe.run(..., run_ic_decay_diagnostics=True) or set "
+                "report.price_panel = price_df before calling this method."
             )
 
         ICDecayDiagnostics, _ = _lazy_diagnostics()
@@ -326,50 +353,50 @@ class FactorReport:
         """终端打印因子评估报告。"""
         sep = "=" * 64
         print(f"\n{sep}")
-        print(f"  因子名称: {self.factor_name}")
+        print(f"  Factor Name: {self.factor_name}")
         print(sep)
 
         # ── 合成权重（多因子时显示）────────────────────────────────────────
         if self.composite_weights:
-            print(f"\n【因子合成权重】")
+            print(f"\n[Composite Factor Weights]")
             for name, w in sorted(self.composite_weights.items(), key=lambda x: -x[1]):
                 bar = "█" * max(0, int(w * 40))
                 print(f"  {name:<28} {w:>6.2%}  {bar}")
-            print(f"  {'合计':<28} {sum(self.composite_weights.values()):>6.2%}")
+            print(f"  {'Total':<28} {sum(self.composite_weights.values()):>6.2%}")
 
         s = self.ic_stats_
-        print(f"\n【IC 分析】")
+        print(f"\n[IC Analysis]")
         print(f"  Mean IC      : {s.get('mean_ic', 'N/A'):.4f}  "
-              f"（合格 |IC| > 0.02，优秀 > 0.05）")
+              f"(pass |IC| > 0.02, strong > 0.05)")
         print(f"  Std  IC      : {s.get('std_ic', 'N/A'):.4f}")
         print(f"  ICIR         : {s.get('icir', 'N/A'):.4f}  "
-              f"（合格 > 0.5，优秀 > 1.0）")
-        print(f"  IC 胜率      : {s.get('win_rate', 'N/A'):.1%}  "
-              f"（合格 > 55%）")
-        print(f"  t 统计量     : {s.get('t_stat', 'N/A'):.4f}  "
-              f"（|t| > 2 显著）")
+              f"(pass > 0.5, strong > 1.0)")
+        print(f"  IC Win Rate  : {s.get('win_rate', 'N/A'):.1%}  "
+              f"(pass > 55%)")
+        print(f"  t-stat       : {s.get('t_stat', 'N/A'):.4f}  "
+              f"(|t| > 2 is significant)")
         print(f"  Newey-West t : {self.ic_nw.get('nw_t_stat', 'N/A')}")
-        print(f"  有效期数     : {s.get('total_periods', 'N/A')}")
+        print(f"  Valid Periods: {s.get('total_periods', 'N/A')}")
 
-        print(f"\n【IC 衰减（不同预测期 Mean IC）】")
+        print(f"\n[IC Decay (Mean IC by horizon)]")
         print(self.ic_decay_df[["mean_ic", "icir"]].to_string())
 
         ls = self.ls_stats
-        print(f"\n【分层回测 · 多空组合】")
-        print(f"  年化收益     : {ls.get('ls_annual_return', 'N/A'):.2%}  "
-              f"（合格 > 10%）")
-        print(f"  年化夏普     : {ls.get('ls_sharpe', 'N/A'):.4f}  "
-              f"（合格 > 1.0）")
-        print(f"  最大回撤     : {ls.get('ls_max_drawdown', 'N/A'):.2%}  "
-              f"（合格 < 30%）")
-        print(f"  Calmar 比率  : {ls.get('ls_calmar', 'N/A'):.4f}  "
-              f"（合格 > 0.5）")
-        print(f"  多空胜率     : {ls.get('ls_win_rate', 'N/A'):.1%}  "
-              f"（合格 > 55%）")
-        print(f"  单调性得分   : {ls.get('monotone_score', 'N/A'):.4f}  "
-              f"（越接近 1 越好）")
+        print(f"\n[Layer Backtest · Long-Short]")
+        print(f"  Annual Return: {ls.get('ls_annual_return', 'N/A'):.2%}  "
+              f"(pass > 10%)")
+        print(f"  Annual Sharpe: {ls.get('ls_sharpe', 'N/A'):.4f}  "
+              f"(pass > 1.0)")
+        print(f"  Max Drawdown : {ls.get('ls_max_drawdown', 'N/A'):.2%}  "
+              f"(pass < 30%)")
+        print(f"  Calmar Ratio : {ls.get('ls_calmar', 'N/A'):.4f}  "
+              f"(pass > 0.5)")
+        print(f"  LS Win Rate  : {ls.get('ls_win_rate', 'N/A'):.1%}  "
+              f"(pass > 55%)")
+        print(f"  Monotone Score: {ls.get('monotone_score', 'N/A'):.4f}  "
+              f"(closer to 1 is better)")
 
-        print(f"\n【各层年化收益】")
+        print(f"\n[Annualized Return by Layer]")
         ann = ls.get("layer_annual_return")
         if ann is not None:
             for k, v in ann.items():
@@ -380,11 +407,44 @@ class FactorReport:
                     print(f"  {k}: {v:>8.2%}  {bar}")
 
         t = self.turnover
-        print(f"\n【换手率与交易成本】")
-        print(f"  平均单边换手率: {t.get('avg_turnover', 'N/A'):.2%}")
-        print(f"  每期估算成本  : {t.get('avg_cost', 'N/A'):.4%}")
+        print(f"\n[Turnover and Trading Cost]")
+        print(f"  Avg One-way Turnover: {t.get('avg_turnover', 'N/A'):.2%}")
+        print(f"  Estimated Cost/Period: {t.get('avg_cost', 'N/A'):.4%}")
 
         print(f"\n{sep}\n")
+
+    def run_advanced_diagnostics(
+        self,
+        save_dir: Optional[str | Path] = None,
+        *,
+        n_groups: int = 5,
+        direction: int = 1,
+        periods_per_year: int = 12,
+        peer_factors: Optional[List[str]] = None,
+        min_cs_nobs: int = 20,
+        corr_method: str = "spearman",
+        high_corr_threshold: float = 0.7,
+        nw_lag_rule: str = "t_pow_0.25",
+        enable_wide_output: bool = True,
+    ) -> object:
+        """Run advanced diagnostics and optionally save outputs."""
+        runner, _ = _lazy_advanced_diagnostics()
+        out_dir = Path(save_dir) if save_dir is not None else Path("output") / self.factor_name / "advanced_diagnostics"
+        adv_report = runner(
+            self,
+            output_dir=out_dir,
+            n_groups=n_groups,
+            direction=direction,
+            periods_per_year=periods_per_year,
+            peer_factors=peer_factors,
+            min_cs_nobs=min_cs_nobs,
+            corr_method=corr_method,
+            high_corr_threshold=high_corr_threshold,
+            nw_lag_rule=nw_lag_rule,
+            enable_wide_output=enable_wide_output,
+        )
+        self._advanced_report = adv_report
+        return adv_report
 
     # ── 保存 ─────────────────────────────────────────────────────────────────
 
@@ -417,11 +477,14 @@ class FactorReport:
                    "avg_cost":         self.turnover.get("avg_cost"),
                    }
         pd.DataFrame([summary]).to_csv(out / "summary.csv", index=False)
-        print(f"[OK] 报告已保存至 {out}/")
+        print(f"[OK] Report saved to {out}/")
 
         # ── 若诊断报告已运行，自动保存到 ic_decay_diagnostics/ 子目录 ───────
         if self._diag_report is not None:
             _save_diag_report(self._diag_report, out / "ic_decay_diagnostics")
+        if self._advanced_report is not None:
+            self._advanced_report.output_dir = out / "advanced_diagnostics"
+            self._advanced_report.save()
 
     # ── 属性便捷访问 ─────────────────────────────────────────────────────────
 
@@ -532,7 +595,7 @@ class FactorPipeline:
             if n in BUILTIN_FACTORS:
                 self.engine.register(n, BUILTIN_FACTORS[n])
             else:
-                warnings.warn(f"内置因子 '{n}' 不存在，已跳过。")
+                warnings.warn(f"Built-in factor '{n}' not found; skipped.")
         return self
 
     # ── 核心运行 ──────────────────────────────────────────────────────────────
@@ -557,6 +620,13 @@ class FactorPipeline:
         resample_monthly: bool = True,               # 月度重采样（推荐）
         config:           Optional[ResearchConfig] = None,  # Phase C: 结构化配置
         run_ic_decay_diagnostics: bool = False,      # 是否在回测后运行 IC 衰减诊断
+        run_advanced_diagnostics: bool = False,      # 是否运行高级诊断包
+        advanced_peer_factors: Optional[List[str]] = None,
+        advanced_min_cs_nobs: int = 20,
+        advanced_corr_method: str = "spearman",
+        advanced_high_corr_threshold: float = 0.7,
+        advanced_nw_lag_rule: str = "t_pow_0.25",
+        advanced_enable_wide_output: bool = True,
     ) -> FactorReport:
         """
         执行完整的因子检验流程。
@@ -595,7 +665,7 @@ class FactorPipeline:
         if config is None:
             if not factor_name:
                 raise ValueError(
-                    "run() 需要提供 factor_name 或 config=ResearchConfig(...)。"
+                    "run() requires factor_name or config=ResearchConfig(...)."
                 )
             config = ResearchConfig.from_kwargs(
                 factor_name      = factor_name,
@@ -614,6 +684,12 @@ class FactorPipeline:
                 cost_per_side    = cost_per_side,
                 symbols          = symbols,
                 resample_monthly = resample_monthly,
+                advanced_peer_factors        = advanced_peer_factors,
+                advanced_min_cs_nobs         = advanced_min_cs_nobs,
+                advanced_corr_method         = advanced_corr_method,
+                advanced_high_corr_threshold = advanced_high_corr_threshold,
+                advanced_nw_lag_rule         = advanced_nw_lag_rule,
+                advanced_enable_wide_output  = advanced_enable_wide_output,
             )
         # 从 config 提取所有运行参数（统一来源）
         factor_name      = config.factor_name
@@ -632,21 +708,27 @@ class FactorPipeline:
         cost_per_side    = config.cost_per_side
         symbols          = config.symbols
         resample_monthly = config.resample_monthly
+        advanced_peer_factors        = config.advanced_peer_factors
+        advanced_min_cs_nobs         = config.advanced_min_cs_nobs
+        advanced_corr_method         = config.advanced_corr_method
+        advanced_high_corr_threshold = config.advanced_high_corr_threshold
+        advanced_nw_lag_rule         = config.advanced_nw_lag_rule
+        advanced_enable_wide_output  = config.advanced_enable_wide_output
         import time as _time
         _run_start = _time.perf_counter()
         if self._cache is not None:
             self._cache.reset_stats()
 
-        print(f"\n[1/6] 构建因子面板: {factor_name} ...")
+        print(f"\n[1/6] Building factor panel: {factor_name} ...")
         factor_panel = self._builder.build_panel(
             factor_name, start=start, end=end, symbols=symbols
         )
         if factor_panel.empty:
-            raise ValueError(f"因子 '{factor_name}' 面板为空，请检查因子函数或数据。")
+            raise ValueError(f"Factor panel '{factor_name}' is empty; check factor function or source data.")
 
-        print(f"      因子面板: {factor_panel.shape[0]} 个交易日 × {factor_panel.shape[1]} 只股票")
+        print(f"      Factor panel: {factor_panel.shape[0]} trading days x {factor_panel.shape[1]} symbols")
 
-        print(f"\n[2/6] 构建收益率面板（forward={forward}天，T+1 已内置）...")
+        print(f"\n[2/6] Building return panel (forward={forward}, T+1 already applied) ...")
         return_panel = self._builder.build_return_panel(
             forward=forward, start=start, end=end, symbols=symbols
         )
@@ -657,8 +739,8 @@ class FactorPipeline:
         n_dropped = len(return_panel) - len(valid_ret_idx)
         if n_dropped > 0:
             warnings.warn(
-                f"[尾部截断] return_panel 末尾 {n_dropped} 个交易日（含 T+1 滞后）"
-                f"全为 NaN，已同步截断 factor_panel 对应行。"
+                f"[tail-trim] return_panel tail has {n_dropped} all-NaN trading days "
+                f"(including T+1 lag); aligned rows were trimmed from factor_panel."
             )
             return_panel = return_panel.loc[valid_ret_idx]
             factor_panel = factor_panel.loc[factor_panel.index.intersection(valid_ret_idx)]
@@ -669,7 +751,7 @@ class FactorPipeline:
         # BUG 10 NOTE: T+1 已内置于 build_return_panel（price.shift(-fwd)/price-1 再
         # .shift(1)），即 return_panel[t] = t+1 日起持有的远期收益。故 factor_panel[t]
         # （t 日收盘计算）与 return_panel[t] 对齐是正确的，无需额外移位。
-        print(f"\n[3/6] 截面预处理（winsorize={winsorize}, standardize={standardize}, neutralize={neutralize}）...")
+        print(f"\n[3/6] Cross-sectional preprocessing (winsorize={winsorize}, standardize={standardize}, neutralize={neutralize}) ...")
 
         if winsorize:
             factor_panel = self.engine.apply_cross_section(factor_panel, cs_winsorize)
@@ -687,7 +769,7 @@ class FactorPipeline:
                 industry_map = self.engine.industry_map,
             )
         elif neutralize:
-            warnings.warn("neutralize=True 但 industry_map 为空，跳过中性化。")
+            warnings.warn("neutralize=True but industry_map is empty; neutralization skipped.")
 
         if standardize == "rank":
             factor_panel = self.engine.apply_cross_section(factor_panel, cs_rank)
@@ -700,7 +782,7 @@ class FactorPipeline:
         # BUG 9 FIX: 为每个 ic_forward_list 中的 forward 构建收益率面板，
         # 传入 ic_decay 的 return_panels 参数，消除双路径不一致问题。
         # 注意：此处在日频面板上构建多个 forward 的收益率，与主 IC 路径同源。
-        print(f"\n[4/6] IC 分析（method={ic_method}）...")
+        print(f"\n[4/6] IC analysis (method={ic_method}) ...")
         ic_return_panels: Dict[int, pd.DataFrame] = {}
         for _fwd in ic_forward_list:
             _rp = self._builder.build_return_panel(
@@ -729,7 +811,7 @@ class FactorPipeline:
                 )
                 del self.engine._registry["__close_diag__"]
             except Exception as _pe:
-                warnings.warn(f"[diagnostics] 无法获取 price_panel: {_pe}")
+                warnings.warn(f"[diagnostics] Failed to fetch price_panel: {_pe}")
             try:
                 self.engine.register("__mktcap_diag__", lambda df: df["总市值（万元）"])
                 _diag_mktcap_panel = self._builder.build_panel(
@@ -747,7 +829,7 @@ class FactorPipeline:
         # layer_backtest 和 turnover_analysis 中每行对应一个月，不存在日频滚动重叠。
         if resample_monthly:
             factor_panel, return_panel = _resample_monthly(factor_panel, return_panel)
-            print(f"      [月度重采样] {factor_panel.shape[0]} 个月末截面")
+            print(f"      [monthly-resample] {factor_panel.shape[0]} month-end snapshots")
 
         # ── IC 分析（月度重采样后执行，与 return_panel 频率一致）────────────
         ic_series = compute_ic(factor_panel, return_panel, method=ic_method)
@@ -757,7 +839,7 @@ class FactorPipeline:
         # ── 分层回测 ──────────────────────────────────────────────────────────
         # BUG 14 NOTE: periods_per_year 由调用方指定（月度重采样后应传 12），
         # _annual_return 使用 total^(periods_per_year/n)-1，月频输入时正确年化。
-        print(f"\n[5/6] 分层回测（n_groups={n_groups}）...")
+        print(f"\n[5/6] Layer backtest (n_groups={n_groups}) ...")
         layer_ret = layer_backtest(
             factor_panel, return_panel,
             n_groups=n_groups, direction=direction
@@ -765,7 +847,7 @@ class FactorPipeline:
         ls_stats_ = long_short_stats(layer_ret, periods_per_year=periods_per_year, rf=rf)
 
         # ── 换手率分析 ────────────────────────────────────────────────────────
-        print(f"\n[6/6] 换手率分析...")
+        print(f"\n[6/6] Turnover analysis ...")
         turnover_ = turnover_analysis(
             factor_panel, n_groups=n_groups, direction=direction,
             cost_per_side=cost_per_side
@@ -789,8 +871,9 @@ class FactorPipeline:
 
         # ── IC 衰减诊断（可选）──────────────────────────────────────────────
         if run_ic_decay_diagnostics and _diag_price_panel is not None:
-            print(f"\n[+] IC 衰减诊断（6 模块）...")
+            print(f"\n[+] IC decay diagnostics (6 modules) ...")
             try:
+                _factor_panel_monthly = report.factor_panel
                 # 诊断模块使用日频原始因子面板（resample 前），不含 T+1
                 # _diag_factor_panel_raw 已经过 winsorize/neutralize/standardize
                 # 但未经 T+1 shift（诊断模块内部按需 shift）
@@ -799,9 +882,97 @@ class FactorPipeline:
                     forward_list = list(ic_forward_list),
                     verbose      = True,
                 )
+                report.factor_panel = _factor_panel_monthly
                 # save() 时自动保存到 ic_decay_diagnostics/ 子目录
             except Exception as _de:
-                warnings.warn(f"[diagnostics] IC 衰减诊断运行失败（非致命）: {_de}")
+                warnings.warn(f"[diagnostics] IC decay diagnostics failed (non-fatal): {_de}")
+
+        if run_advanced_diagnostics:
+            print(f"\n[+] Advanced Diagnostics Pack ...")
+            try:
+                # ── Auto-build peer factor panels (user-provided panels keep priority) ──
+                explicit_peers = getattr(report, "peer_factor_panels", None)
+                explicit_peers = explicit_peers if isinstance(explicit_peers, dict) else {}
+                auto_peer_names = list(
+                    advanced_peer_factors
+                    if advanced_peer_factors is not None
+                    else ["value_pb", "momentum_12_1", "vol_20d", "turnover_rate", "size_log_mktcap"]
+                )
+                auto_peer_panels: Dict[str, pd.DataFrame] = {}
+                unavailable_peers: List[str] = []
+
+                # Ensure mktcap panel for advanced modules if absent.
+                if report.mktcap_panel is None:
+                    try:
+                        self.engine.register("__mktcap_adv__", lambda df: df["总市值（万元）"])
+                        _mc = self._builder.build_panel("__mktcap_adv__", start=start, end=end, symbols=symbols)
+                        del self.engine._registry["__mktcap_adv__"]
+                        _mc = _resample_panel_monthly(_mc) if resample_monthly else _mc
+                        report.mktcap_panel = _mc.reindex(report.factor_panel.index)
+                    except Exception as _mce:
+                        unavailable_peers.append("mktcap_panel")
+
+                # Value exposure for HML construction in alpha models.
+                if getattr(report, "value_panel", None) is None:
+                    try:
+                        from factor_framework.factor_zoo import BUILTIN_FACTORS
+                        _tmp_reg = False
+                        if "value_pb" not in self.engine._registry and "value_pb" in BUILTIN_FACTORS:
+                            self.engine.register("value_pb", BUILTIN_FACTORS["value_pb"])
+                            _tmp_reg = True
+                        _vp = self._builder.build_panel("value_pb", start=start, end=end, symbols=symbols)
+                        if _tmp_reg:
+                            del self.engine._registry["value_pb"]
+                        _vp = _resample_panel_monthly(_vp) if resample_monthly else _vp
+                        report.value_panel = _vp.reindex(report.factor_panel.index)
+                    except Exception:
+                        report.value_panel = None
+
+                # Build built-in peer factor panels; never override explicit input.
+                from factor_framework.factor_zoo import BUILTIN_FACTORS
+                for _peer in auto_peer_names:
+                    if _peer in explicit_peers:
+                        continue
+                    try:
+                        _tmp_reg = False
+                        if _peer not in self.engine._registry and _peer in BUILTIN_FACTORS:
+                            self.engine.register(_peer, BUILTIN_FACTORS[_peer])
+                            _tmp_reg = True
+                        _pp = self._builder.build_panel(_peer, start=start, end=end, symbols=symbols)
+                        if _tmp_reg:
+                            del self.engine._registry[_peer]
+                        if winsorize:
+                            _pp = self.engine.apply_cross_section(_pp, cs_winsorize)
+                        if standardize == "rank":
+                            _pp = self.engine.apply_cross_section(_pp, cs_rank)
+                        elif standardize == "zscore":
+                            _pp = self.engine.apply_cross_section(_pp, cs_zscore)
+                        if resample_monthly:
+                            _pp = _resample_panel_monthly(_pp)
+                        auto_peer_panels[_peer] = _pp.reindex(report.factor_panel.index)
+                    except Exception:
+                        unavailable_peers.append(_peer)
+
+                merged_peer_panels = dict(auto_peer_panels)
+                merged_peer_panels.update(explicit_peers)
+                report.peer_factor_panels = merged_peer_panels
+                report.unavailable_peer_factors = sorted(
+                    set(list(getattr(report, "unavailable_peer_factors", []) or []) + unavailable_peers)
+                )
+
+                report.run_advanced_diagnostics(
+                    n_groups=n_groups,
+                    direction=direction,
+                    periods_per_year=periods_per_year,
+                    peer_factors=auto_peer_names,
+                    min_cs_nobs=advanced_min_cs_nobs,
+                    corr_method=advanced_corr_method,
+                    high_corr_threshold=advanced_high_corr_threshold,
+                    nw_lag_rule=advanced_nw_lag_rule,
+                    enable_wide_output=advanced_enable_wide_output,
+                )
+            except Exception as _ade:
+                warnings.warn(f"[advanced_diagnostics] Failed (non-fatal): {_ade}")
 
         # ── Phase D: 生成 RunManifest ─────────────────────────────────────
         try:
@@ -817,9 +988,9 @@ class FactorPipeline:
                 git_sha    = (_ci.get("git_sha") if _ci else None),
             )
         except Exception as _mex:
-            warnings.warn(f"[manifest] 生成失败（非致命）: {_mex}")
+            warnings.warn(f"[manifest] Generation failed (non-fatal): {_mex}")
 
-        print("\n[OK] 流程完成。")
+        print("\n[OK] Pipeline completed.")
         return report
 
     # ── 批量多因子运行（面板预构建版）──────────────────────────────────────────
@@ -871,8 +1042,8 @@ class FactorPipeline:
         n_dropped = len(return_panel) - len(valid_ret_idx)
         if n_dropped > 0:
             warnings.warn(
-                f"[尾部截断] return_panel 末尾 {n_dropped} 个交易日（含 T+1 滞后）"
-                f"全为 NaN，已同步截断所有因子面板对应行。"
+                f"[tail-trim] return_panel tail has {n_dropped} all-NaN trading days "
+                f"(including T+1 lag); aligned rows were trimmed from all factor panels."
             )
             return_panel = return_panel.loc[valid_ret_idx]
 
@@ -889,10 +1060,10 @@ class FactorPipeline:
         total = len(factor_panels)
 
         for i, (factor_name, raw_panel) in enumerate(factor_panels.items(), 1):
-            print(f"\n[{i:02d}/{total}] 检验因子: {factor_name} ...")
+            print(f"\n[{i:02d}/{total}] Evaluating factor: {factor_name} ...")
             try:
                 if raw_panel.empty:
-                    raise ValueError("因子面板为空")
+                    raise ValueError("factor panel is empty")
 
                 # 对齐尾部截断（用 loc+intersection 避免 reindex 引入幽灵 NaN 行）
                 common_idx   = raw_panel.index.intersection(valid_ret_idx)
@@ -915,7 +1086,7 @@ class FactorPipeline:
                         industry_map=self.engine.industry_map,
                     )
                 elif neutralize:
-                    warnings.warn("neutralize=True 但 industry_map 为空，跳过中性化。")
+                    warnings.warn("neutralize=True but industry_map is empty; neutralization skipped.")
 
                 if standardize == "rank":
                     factor_panel = self.engine.apply_cross_section(factor_panel, cs_rank)
@@ -971,7 +1142,7 @@ class FactorPipeline:
                     return_panel = ret_panel,
                 )
             except Exception as exc:
-                warnings.warn(f"因子 '{factor_name}' 检验失败: {exc}")
+                warnings.warn(f"Factor '{factor_name}' evaluation failed: {exc}")
 
         return reports
 
@@ -992,7 +1163,7 @@ class FactorPipeline:
                 report = self.run(name, **kwargs)
                 rows.append(report.summary_dict)
             except Exception as e:
-                warnings.warn(f"因子 '{name}' 检验失败: {e}")
+                warnings.warn(f"Factor '{name}' evaluation failed: {e}")
                 rows.append({"factor": name})
         return pd.DataFrame(rows).set_index("factor")
 
@@ -1039,27 +1210,27 @@ class FactorPipeline:
                       report.composite_weights 存储各因子权重。
         """
         if not factor_names:
-            raise ValueError("factor_names 不能为空。")
+            raise ValueError("factor_names cannot be empty.")
 
         method = method.lower().strip()
         if method not in ("equal", "icir"):
-            raise ValueError(f"不支持的合成方法 '{method}'，请选择 'equal' 或 'icir'。")
+            raise ValueError(f"Unsupported composition method '{method}'. Choose 'equal' or 'icir'.")
 
         # ── Step 1：逐因子构建面板 ───────────────────────────────────────────
         print(f"\n{'='*60}")
-        print(f"  多因子合成流程  [{composite_name}]  方法={method}")
+        print(f"  Multi-factor composition  [{composite_name}]  method={method}")
         print(f"{'='*60}")
 
         factor_panels:  Dict[str, pd.DataFrame] = {}
         ic_series_dict: Dict[str, pd.Series]    = {}
 
         for i, name in enumerate(factor_names, 1):
-            print(f"\n[因子 {i}/{len(factor_names)}] 构建面板: {name} ...")
+            print(f"\n[Factor {i}/{len(factor_names)}] Building panel: {name} ...")
             raw_panel = self._builder.build_panel(
                 name, start=start, end=end, symbols=symbols
             )
             if raw_panel.empty:
-                warnings.warn(f"因子 '{name}' 面板为空，已跳过。")
+                warnings.warn(f"Factor '{name}' panel is empty; skipped.")
                 continue
 
             # 截面预处理（每个因子独立处理）
@@ -1084,10 +1255,10 @@ class FactorPipeline:
             factor_panels[name] = panel
 
         if not factor_panels:
-            raise ValueError("所有因子面板均为空，无法合成。")
+            raise ValueError("All factor panels are empty; cannot compose.")
 
         # ── Step 2：构建收益率面板（公共一份）──────────────────────────────
-        print(f"\n构建收益率面板（forward={forward} 天）...")
+        print(f"\nBuilding return panel (forward={forward}) ...")
         return_panel = self._builder.build_return_panel(
             forward=forward, start=start, end=end, symbols=symbols
         )
@@ -1097,9 +1268,8 @@ class FactorPipeline:
         n_dropped = len(return_panel) - len(valid_ret_idx)
         if n_dropped > 0:
             warnings.warn(
-                f"[尾部截断] return_panel 末尾 {n_dropped} 个交易日因 "
-                f"forward={forward} 天 shift 导致收益率全为 NaN，"
-                f"已同步截断所有因子面板的对应行。"
+                f"[tail-trim] return_panel tail has {n_dropped} all-NaN trading days "
+                f"due to forward={forward} shift; aligned rows were trimmed from all factor panels."
             )
             return_panel  = return_panel.loc[valid_ret_idx]
             factor_panels = {
@@ -1109,12 +1279,12 @@ class FactorPipeline:
 
         # ── Step 3：逐因子计算 IC（ICIR 加权需要）──────────────────────────
         if method == "icir":
-            print(f"\n计算各因子 IC（ICIR 滚动窗口={icir_window} 期）...")
+            print(f"\nComputing IC per factor (ICIR rolling window={icir_window}) ...")
             for name, panel in factor_panels.items():
                 ic_series_dict[name] = compute_ic(panel, return_panel, method=ic_method)
 
         # ── Step 4：合成因子 ─────────────────────────────────────────────────
-        print(f"\n合成因子（方法={method}）...")
+        print(f"\nComposing factor (method={method}) ...")
         if method == "equal":
             composite_panel, weights = equal_weight(factor_panels)
         else:  # icir
@@ -1136,10 +1306,10 @@ class FactorPipeline:
                     mean_ic = float(ic_clean.mean())
                     std_ic  = float(ic_clean.std(ddof=1))
                     icir_vals[name] = mean_ic / std_ic if std_ic > 0 else 0.0
-        print_weights(weights, method={"equal": "等权", "icir": "ICIR加权"}[method], icir_dict=icir_vals)
+        print_weights(weights, method={"equal": "Equal Weight", "icir": "ICIR Weight"}[method], icir_dict=icir_vals)
 
         # ── Step 5：合成因子的 IC 分析 ────────────────────────────────────
-        print(f"计算合成因子 IC ...")
+        print(f"Computing composite factor IC ...")
         ic_series = compute_ic(composite_panel, return_panel, method=ic_method)
         ic_s      = ic_stats(ic_series, annualize_periods=periods_per_year)
         ic_nw     = ic_significance(ic_series, lags=max(1, int(len(ic_series) ** 0.25)))
@@ -1159,7 +1329,7 @@ class FactorPipeline:
         )
 
         # ── Step 6：分层回测 ──────────────────────────────────────────────
-        print(f"分层回测（n_groups={n_groups}）...")
+        print(f"Layer backtest (n_groups={n_groups}) ...")
         layer_ret = layer_backtest(
             composite_panel, return_panel,
             n_groups=n_groups, direction=direction
@@ -1167,7 +1337,7 @@ class FactorPipeline:
         ls_stats_ = long_short_stats(layer_ret, periods_per_year=periods_per_year, rf=rf)
 
         # ── Step 7：换手率 ────────────────────────────────────────────────
-        print(f"换手率分析 ...")
+        print(f"Turnover analysis ...")
         turnover_ = turnover_analysis(
             composite_panel, n_groups=n_groups, direction=direction,
             cost_per_side=cost_per_side
@@ -1187,5 +1357,5 @@ class FactorPipeline:
             composite_weights  = weights,
         )
 
-        print("\n[OK] 多因子合成流程完成。")
+        print("\n[OK] Multi-factor composition completed.")
         return report

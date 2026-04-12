@@ -90,12 +90,12 @@ FACTORS = ["momentum_12_1", "vol_20d", "value_pb"]
 # ═══════════════════════════════════════════════════════════════════════════════
 
 print("=" * 64)
-print("  三因子实例回测演示（v2.9 修复版：T+1滞后 + 月度重采样）")
+print(" （v2.9 ：T+1 + ）")
 print("=" * 64)
-print(f"\n  因子  : {', '.join(FACTORS)}")
-print(f"  区间  : {CFG['start']} ~ {CFG['end']}")
-print(f"  预测期: {CFG['forward']} 交易日（月度）")
-print(f"  分层数: {CFG['n_groups']}")
+print(f"\n : {', '.join(FACTORS)}")
+print(f" : {CFG['start']} ~ {CFG['end']}")
+print(f" : {CFG['forward']} （）")
+print(f" : {CFG['n_groups']}")
 
 t0 = time.time()
 
@@ -111,7 +111,7 @@ engine = pipe.engine
 # Step 1: 批量构建三因子面板（一次遍历所有 CSV，共享 IO 缓存）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-print("\n\n[Step 1/4] 批量构建因子面板（一次读盘）...")
+print("\n\n[Step 1/4] （）...")
 t1 = time.time()
 
 all_panels = engine.build_panel_batch(
@@ -124,18 +124,18 @@ all_panels = engine.build_panel_batch(
 
 # 过滤空面板
 valid_panels = {n: p for n, p in all_panels.items() if not p.empty}
-print(f"\n  有效因子面板: {list(valid_panels.keys())}")
+print(f"\n : {list(valid_panels.keys())}")
 for name, panel in valid_panels.items():
-    print(f"    {name:<20}: {panel.shape[0]} 日 × {panel.shape[1]} 只股票"
+    print(f" {name:<20}: {panel.shape[0]} × {panel.shape[1]} "
           f"  (非空率 {panel.notna().mean().mean():.1%})")
 
-print(f"\n  ✓ Step 1 完成，耗时 {time.time() - t1:.1f}s")
+print(f"\n ✓ Step 1 ， {time.time() - t1:.1f}s")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Step 2: 构建收益率面板
 # ═══════════════════════════════════════════════════════════════════════════════
 
-print("\n\n[Step 2/3] 构建月度收益率面板（主 forward）...")
+print("\n\n[Step 2/3] （ forward）...")
 t2 = time.time()
 
 return_panel = engine.build_return_panel(
@@ -144,8 +144,8 @@ return_panel = engine.build_return_panel(
     end       = CFG["end"],
     fast_mode = True,
 )
-print(f"  收益率面板: {return_panel.shape[0]} 日 × {return_panel.shape[1]} 只股票")
-print(f"  ✓ Step 2 完成，耗时 {time.time() - t2:.1f}s")
+print(f" : {return_panel.shape[0]} × {return_panel.shape[1]} ")
+print(f" ✓ Step 2 ， {time.time() - t2:.1f}s")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Step 3: 批量因子检验（截面处理 + IC 分析 + 分层回测 + 换手率）
@@ -153,11 +153,11 @@ print(f"  ✓ Step 2 完成，耗时 {time.time() - t2:.1f}s")
 # BUG-9 已修复：IC 衰减面板在 pipeline 内部自动为每个 ic_forward_list 中的 forward
 # 构建同源收益率面板，与主 IC 路径完全一致，不再需要独立的 close_panel 步骤。
 
-print("\n\n[Step 3/3] 批量因子检验（IC分析 + 分层回测 + 换手率）...")
+print("\n\n[Step 3/3] （IC + + ）...")
 t4 = time.time()
 
 if not valid_panels:
-    print("  ✗ 无有效因子面板，退出。")
+    print(" ✗ ，。")
     raise SystemExit(1)
 
 reports = pipe.run_batch_from_panels(
@@ -176,14 +176,14 @@ reports = pipe.run_batch_from_panels(
     cost_per_side    = CFG["cost_per_side"],
 )
 
-print(f"\n  ✓ Step 3 完成，耗时 {time.time() - t4:.1f}s")
+print(f"\n ✓ Step 3 ， {time.time() - t4:.1f}s")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 打印汇总报告
 # ═══════════════════════════════════════════════════════════════════════════════
 
 print("\n\n" + "═" * 64)
-print("  回测结果汇总")
+print(" ")
 print("═" * 64)
 
 for name, rpt in reports.items():
@@ -201,7 +201,7 @@ for name, rpt in reports.items():
 summary_rows = [rpt.summary_dict for rpt in reports.values()]
 summary_df = pd.DataFrame(summary_rows).set_index("factor")
 summary_df.to_csv(CFG["output_dir"] / "comparison_summary.csv")
-print(f"\n  汇总对比表已保存至 {CFG['output_dir'] / 'comparison_summary.csv'}")
+print(f"\n {CFG['output_dir'] / 'comparison_summary.csv'}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 绘图：IC 累积曲线 + 分层净值 + 汇总对比条形图
@@ -292,7 +292,7 @@ ax_cmp.set_ylabel("指标值")
 
 fig_path = CFG["output_dir"] / "backtest_comparison.png"
 fig.savefig(fig_path, dpi=150, bbox_inches="tight")
-print(f"  对比图已保存至 {fig_path}")
+print(f" {fig_path}")
 plt.close(fig)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -300,7 +300,7 @@ plt.close(fig)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 print("\n\n" + "═" * 80)
-print("  三因子关键指标汇总")
+print(" ")
 print("═" * 80)
 display_cols = ["mean_ic", "std_ic", "icir", "win_rate", "t_stat",
                 "ls_annual_return", "ls_sharpe", "ls_max_drawdown",
@@ -329,6 +329,6 @@ pd.set_option("display.width", 120)
 print(display_df.T.to_string())
 
 total_time = time.time() - t0
-print(f"\n\n  ✓ 三因子回测全部完成，总耗时 {total_time:.1f}s")
-print(f"  输出目录: {CFG['output_dir'].resolve()}")
+print(f"\n\n ✓ ， {total_time:.1f}s")
+print(f" : {CFG['output_dir'].resolve()}")
 print("=" * 64)

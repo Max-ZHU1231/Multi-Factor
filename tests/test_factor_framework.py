@@ -2607,7 +2607,7 @@ class TestDepGraph:
         g = DepGraph()
         g.register("A", ["B"])
         g.register("B", ["A"])
-        with pytest.raises(ValueError, match="环"):
+        with pytest.raises(ValueError, match="Cycle detected"):
             g.topo_order(["A", "B"])
 
 

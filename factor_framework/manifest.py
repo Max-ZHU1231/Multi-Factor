@@ -140,7 +140,7 @@ class RunManifest:
     def __init__(self, data: Dict[str, Any]) -> None:
         missing = self.REQUIRED_FIELDS - set(data.keys())
         if missing:
-            raise ValueError(f"RunManifest 缺少必填字段: {sorted(missing)}")
+            raise ValueError(f"RunManifest missing required fields: {sorted(missing)}")
         self._data = data
 
     # ── 工厂方法 ──────────────────────────────────────────────────────────────
@@ -310,14 +310,14 @@ class RunManifest:
         print(f"  git_sha      : {d['git_sha']}")
         print(f"  config_hash  : {d['config_hash']}")
         print(f"  snapshot_id  : {d['data_snapshot_id']}")
-        print(f"  因子         : {', '.join(d['factors'])}")
-        print(f"  日期范围     : {d['date_range']['start']} ~ {d['date_range']['end']}")
+        print(f"  factors      : {', '.join(d['factors'])}")
+        print(f"  date_range   : {d['date_range']['start']} ~ {d['date_range']['end']}")
         print(f"  exit_status  : {d['exit_status']}")
         if d["failures"]:
-            print(f"  失败因子     : {', '.join(d['failures'])}")
-        print(f"  耗时         : {d['run_duration_secs']}s")
+            print(f"  failed_factors: {', '.join(d['failures'])}")
+        print(f"  duration     : {d['run_duration_secs']}s")
         if stats:
-            print(f"  缓存命中(v2) : {stats.get('new_key_hit', 0)}")
-            print(f"  缓存命中(旧) : {stats.get('legacy_key_hit', 0)}")
-            print(f"  重新计算     : {stats.get('recompute', 0)}")
+            print(f"  cache_hit(v2): {stats.get('new_key_hit', 0)}")
+            print(f"  cache_hit(old): {stats.get('legacy_key_hit', 0)}")
+            print(f"  recompute    : {stats.get('recompute', 0)}")
         print("─" * 56)

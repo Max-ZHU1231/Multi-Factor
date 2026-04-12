@@ -69,7 +69,7 @@ def test_next_trading_day_lag2(simple_cal):
 def test_next_trading_day_out_of_range(simple_cal):
     """Should raise ValueError when effective_date exceeds calendar end."""
     last = simple_cal[-1]
-    with pytest.raises(ValueError, match="超出交易日历"):
+    with pytest.raises(ValueError, match="out of trading-calendar range|exceeds trading-calendar end"):
         _next_trading_day(simple_cal, last, lag=1)
 
 
@@ -126,7 +126,7 @@ def test_invalid_metric_raises():
 
 def test_lag_zero_guard():
     """lag=0 without allow_lag_zero=True should raise ValueError."""
-    with pytest.raises(ValueError, match="未来函数"):
+    with pytest.raises(ValueError, match="look-ahead bias"):
         DynamicUniverseBuilder(effective_lag_days=0)
 
 

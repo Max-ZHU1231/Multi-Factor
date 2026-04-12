@@ -373,7 +373,7 @@ def test_manifest_load_invalid_raises():
         json.dump(bad_data, f)
         fname = f.name
     try:
-        with pytest.raises(ValueError, match="缺少必填字段"):
+        with pytest.raises(ValueError, match="missing required fields"):
             RunManifest.load(fname)
     finally:
         os.unlink(fname)

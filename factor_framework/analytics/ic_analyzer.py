@@ -190,19 +190,19 @@ class ICAnalyzer:
         """打印格式化 IC 分析摘要。"""
         self._check_ran()
         s = self.summary()
-        header = f"── IC 分析摘要 {'[' + factor_name + ']' if factor_name else ''} ──"
+        header = f"── IC Analysis Summary {'[' + factor_name + ']' if factor_name else ''} ──"
         print(header)
-        print(f"  平均 IC        : {s.get('mean_ic', float('nan')):.4f}")
-        print(f"  IC 标准差      : {s.get('std_ic', float('nan')):.4f}")
+        print(f"  Mean IC        : {s.get('mean_ic', float('nan')):.4f}")
+        print(f"  IC Std         : {s.get('std_ic', float('nan')):.4f}")
         print(f"  ICIR           : {s.get('icir', float('nan')):.4f}")
-        print(f"  年化 ICIR      : {s.get('annualized_icir', float('nan')):.4f}")
-        print(f"  胜率           : {s.get('win_rate', float('nan')):.2%}")
-        print(f"  t 统计量       : {s.get('t_stat', float('nan')):.4f}")
+        print(f"  Annualized ICIR: {s.get('annualized_icir', float('nan')):.4f}")
+        print(f"  Win Rate       : {s.get('win_rate', float('nan')):.2%}")
+        print(f"  t-stat         : {s.get('t_stat', float('nan')):.4f}")
         print(f"  Newey-West t   : {s.get('nw_t_stat', float('nan')):.4f}")
-        print(f"  有效期数       : {s.get('total_periods', 0)}")
+        print(f"  Valid Periods  : {s.get('total_periods', 0)}")
 
     def __repr__(self) -> str:
-        status = "已运行" if self._ran else "未运行（调用 .run()）"
+        status = "ran" if self._ran else "not-ran (call .run())"
         return (
             f"ICAnalyzer(method={self.method!r}, "
             f"periods_per_year={self.periods_per_year}, "

@@ -174,30 +174,30 @@ def data_stats(diag: ICDecayDiagnostics) -> Dict:
 def main():
     parser = argparse.ArgumentParser(description="IC Diagnostics Performance Profiler")
     parser.add_argument("--mode",   choices=["synthetic", "real"], default="synthetic")
-    parser.add_argument("--T",      type=int, default=1500, help="交易日数（synthetic 模式）")
-    parser.add_argument("--N",      type=int, default=500,  help="股票数（synthetic 模式）")
+    parser.add_argument("--T", type=int, default=1500, help="（synthetic ）")
+    parser.add_argument("--N", type=int, default=500, help="（synthetic ）")
     parser.add_argument("--seed",   type=int, default=42)
-    parser.add_argument("--write-report", action="store_true", help="将结果写入 performance_report.md")
-    parser.add_argument("--tag",    default="After_P0_P1", help="报告标签（Baseline / After_P0 / After_P1）")
-    parser.add_argument("--no-profile", action="store_true", help="跳过 cProfile（仅模块计时）")
+    parser.add_argument("--write-report", action="store_true", help=" performance_report.md")
+    parser.add_argument("--tag", default="After_P0_P1", help="（Baseline / After_P0 / After_P1）")
+    parser.add_argument("--no-profile", action="store_true", help=" cProfile（）")
     args = parser.parse_args()
 
     print("=" * 70)
-    print(f"IC 衰减诊断性能 Profiling  [mode={args.mode}, tag={args.tag}]")
+    print(f"IC Profiling [mode={args.mode}, tag={args.tag}]")
     print("=" * 70)
 
     # ── 准备数据 ──────────────────────────────────────────────────────────
     if args.mode == "synthetic":
-        print(f"\n生成合成数据 T={args.T}, N={args.N}, seed={args.seed} ...")
+        print(f"\n T={args.T}, N={args.N}, seed={args.seed} ...")
         factor_panel, price_panel, mktcap_panel, industry_map = make_synthetic_data(
             T=args.T, N=args.N, seed=args.seed
         )
     else:
         # 读取真实数据（需要已有 artifact 缓存或直接 pickle）
-        raise NotImplementedError("real 模式需手动加载因子面板，请使用 synthetic 模式进行基准测试。")
+        raise NotImplementedError("real ， synthetic 。")
 
     # ── 构造诊断器（__init__ 计时）────────────────────────────────────────
-    print("\n构造 ICDecayDiagnostics (含 __init__ 预计算) ...")
+    print("\n ICDecayDiagnostics ( __init__ ) ...")
     t_init = time.perf_counter()
     diag = ICDecayDiagnostics(
         factor_panel = factor_panel,
@@ -209,25 +209,25 @@ def main():
         factor_name  = "synthetic",
     )
     t_init_elapsed = time.perf_counter() - t_init
-    print(f"  __init__ 耗时: {t_init_elapsed:.2f}s")
+    print(f" __init__ : {t_init_elapsed:.2f}s")
 
     # ── 数据规模 ──────────────────────────────────────────────────────────
     stats = data_stats(diag)
-    print("\n数据规模:")
+    print("\n:")
     for k, v in stats.items():
         print(f"  {k}: {v}")
 
     # ── 模块级计时 ────────────────────────────────────────────────────────
-    print("\n各模块耗时:")
+    print("\n:")
     timings = time_modules(diag, verbose=True)
     total_elapsed = sum(timings.values())
-    print(f"\n  总计 (M1~M6): {total_elapsed:.2f}s")
-    print(f"  含 __init__:  {total_elapsed + t_init_elapsed:.2f}s")
+    print(f"\n (M1~M6): {total_elapsed:.2f}s")
+    print(f" __init__: {total_elapsed + t_init_elapsed:.2f}s")
 
     # ── cProfile 热点 ────────────────────────────────────────────────────
     profile_text = ""
     if not args.no_profile:
-        print("\n运行 cProfile (run_all 完整流程) ...")
+        print("\n cProfile (run_all ) ...")
         # 需要第二次构造（清空缓存，保证 M3 中性化重新计算）
         diag2 = ICDecayDiagnostics(
             factor_panel = factor_panel,
@@ -239,7 +239,7 @@ def main():
             factor_name  = "synthetic",
         )
         profile_text = profile_run_all(diag2, top_n=15)
-        print("\nTop-15 热点函数 (cumulative time):")
+        print("\nTop-15 (cumulative time):")
         # 只打印关键列
         for line in profile_text.split("\n")[:35]:
             print(line)
@@ -256,7 +256,7 @@ def main():
             total        = total_elapsed,
             profile_text = profile_text,
         )
-        print(f"\n报告已写入: {report_path}")
+        print(f"\n: {report_path}")
 
 
 def _write_report(

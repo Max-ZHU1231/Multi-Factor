@@ -319,15 +319,15 @@ def _check_c1_panel_builder_no_deprecation():
 
 def main():
     print("\n" + "=" * 64)
-    print("  阶段二 DoD 验证")
+    print(" DoD ")
     print("=" * 64)
 
-    print("\n【B1】TimestampedPanel 语义守卫")
+    print("\n【B1】TimestampedPanel ")
     _check("B1-1  compute_ic 拦截 unshifted forward_return",  _check_b1_guard_compute_ic)
     _check("B1-2  layer_backtest 拦截 unshifted forward_return", _check_b1_guard_layer_backtest)
     _check("B1-3  合法 T+1 shifted 配对正常通过",              _check_b1_valid_pair_passes)
 
-    print("\n【B2】DataStore 接线")
+    print("\n【B2】DataStore ")
     _check("B2-1  PanelBuilder 接受 store 参数",               _check_b2_panel_builder_accepts_store)
     _check("B2-2  FactorPipeline 自动构造 CSVDataStore",       _check_b2_pipeline_auto_constructs_csvdatastore)
     _check("B2-3  FactorPipeline 接受并透传 custom store",     _check_b2_pipeline_accepts_custom_store)
@@ -336,11 +336,11 @@ def main():
     _check("B3-1  price_panel 回退路径发出 DeprecationWarning", _check_b3_price_panel_deprecation_warning)
     _check("B3-2  return_panels 主路径无 DeprecationWarning",   _check_b3_return_panels_no_deprecation)
 
-    print("\n【B4】cache_dir 默认值")
+    print("\n【B4】cache_dir ")
     _check("B4-1  默认 cache_dir='cache/' 自动创建 CacheLayer", _check_b4_default_cache_dir_creates_cache_layer)
     _check("B4-2  cache_dir=None 禁用缓存",                    _check_b4_explicit_none_disables_cache)
 
-    print("\n【C1】FactorEngine 废弃警告")
+    print("\n【C1】FactorEngine ")
     _check("C1-1  直接实例化发出 DeprecationWarning",           _check_c1_factor_engine_deprecation)
     _check("C1-2  _internal=True 抑制 DeprecationWarning",     _check_c1_internal_flag_suppresses)
     _check("C1-3  PanelBuilder.engine 不触发 DeprecationWarning", _check_c1_panel_builder_no_deprecation)
@@ -349,18 +349,18 @@ def main():
     passed = sum(1 for _, ok, _ in _results if ok)
     total  = len(_results)
     print(f"\n{'=' * 64}")
-    print(f"  结果: {passed}/{total} 通过")
+    print(f" : {passed}/{total} ")
     print("=" * 64)
 
     if passed < total:
-        print("\n【失败详情】")
+        print("\n【】")
         for label, ok, tb in _results:
             if not ok:
                 print(f"\n  ✗ {label}")
                 print(tb)
         sys.exit(1)
     else:
-        print("\n  ✓ 全部通过 — 阶段二 DoD 收敛！")
+        print("\n ✓ — DoD ！")
         sys.exit(0)
 
 

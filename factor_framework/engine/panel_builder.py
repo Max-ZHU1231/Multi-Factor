@@ -131,7 +131,7 @@ class PanelBuilder:
             if n in BUILTIN_FACTORS:
                 self.engine.register(n, BUILTIN_FACTORS[n])
             else:
-                warnings.warn(f"内置因子 '{n}' 不存在，已跳过。")
+                warnings.warn(f"Built-in factor '{n}' not found; skipped.")
         return self
 
     @property

@@ -112,17 +112,17 @@ class UniverseLoader:
         csv_path = UniverseLoader._resolve_path(universe)
         if csv_path is None:
             raise FileNotFoundError(
-                f"[UniverseLoader] 找不到股票池文件: {universe!r}\n"
-                f"  内置别名: {list(_BUILTIN_ALIAS)}\n"
-                f"  也可传入 CSV 文件路径（含 'code' 列）"
+                f"[UniverseLoader] Universe file not found: {universe!r}\n"
+                f"  built-in aliases: {list(_BUILTIN_ALIAS)}\n"
+                f"  or pass a CSV path containing a 'code' column"
             )
 
         # 读取 CSV
         df = pd.read_csv(csv_path, dtype=str)
         if "code" not in df.columns:
             raise ValueError(
-                f"[UniverseLoader] 文件 {csv_path} 缺少 'code' 列。"
-                f"  现有列: {list(df.columns)}"
+                f"[UniverseLoader] File {csv_path} is missing required 'code' column."
+                f"  current columns: {list(df.columns)}"
             )
 
         # 转换为 ts_code
@@ -139,9 +139,9 @@ class UniverseLoader:
             if after < before:
                 import warnings
                 warnings.warn(
-                    f"[UniverseLoader] 股票池 {universe!r}: "
-                    f"{before - after} 只股票在数据目录中无对应文件，已跳过。"
-                    f"  有效股票数: {after}",
+                    f"[UniverseLoader] Universe {universe!r}: "
+                    f"{before - after} symbols missing in stocks_dir and skipped. "
+                    f"valid symbols: {after}",
                     stacklevel=2,
                 )
 
@@ -168,7 +168,7 @@ class UniverseLoader:
         """
         csv_path = UniverseLoader._resolve_path(universe)
         if csv_path is None:
-            return {"name": universe, "error": "文件不存在"}
+            return {"name": universe, "error": "file_not_found"}
 
         df = pd.read_csv(csv_path, dtype=str)
         ts_codes = [_code_to_ts_code(c) for c in df["code"].dropna()]

@@ -96,8 +96,8 @@ def upgrade_config(raw: dict) -> dict:
     if version == "":
         # 缺失 schema_version → 视为最老版本，静默升级
         warnings.warn(
-            "[ResearchConfig] 配置缺少 schema_version，视为旧版并自动升级至"
-            f" {CURRENT_SCHEMA_VERSION}。建议在配置中显式指定 schema_version。",
+            "[ResearchConfig] Missing schema_version; treated as legacy config and upgraded to "
+            f"{CURRENT_SCHEMA_VERSION}. Consider setting schema_version explicitly.",
             UserWarning,
             stacklevel=3,
         )
@@ -114,14 +114,14 @@ def upgrade_config(raw: dict) -> dict:
         v_min     = _ver(_MIN_SUPPORTED_VERSION)
     except ValueError:
         raise ValueError(
-            f"[ResearchConfig] schema_version 格式非法: {version!r}，"
-            f"期望如 '1.0'。"
+            f"[ResearchConfig] Invalid schema_version format: {version!r}, "
+            f"expected format like '1.0'."
         )
 
     if v_raw < v_min:
         warnings.warn(
-            f"[ResearchConfig] schema_version={version!r} 低于最低支持版本"
-            f" {_MIN_SUPPORTED_VERSION!r}，已自动升级至 {CURRENT_SCHEMA_VERSION}。",
+            f"[ResearchConfig] schema_version={version!r} is below minimum supported version "
+            f"{_MIN_SUPPORTED_VERSION!r}; upgraded to {CURRENT_SCHEMA_VERSION}.",
             UserWarning,
             stacklevel=3,
         )
@@ -133,8 +133,8 @@ def upgrade_config(raw: dict) -> dict:
 
     elif v_raw > v_current:
         warnings.warn(
-            f"[ResearchConfig] schema_version={version!r} 高于当前代码版本"
-            f" {CURRENT_SCHEMA_VERSION!r}，将按现有字段解析，未知字段被忽略。",
+            f"[ResearchConfig] schema_version={version!r} is newer than current code version "
+            f"{CURRENT_SCHEMA_VERSION!r}; parsing known fields only and ignoring unknown fields.",
             UserWarning,
             stacklevel=3,
         )
@@ -191,6 +191,14 @@ class ResearchConfig:
     universe_file:               Optional[str]  = None    # static_file 模式用
     universe_cache_dir:          str            = "cache/universe/"
 
+    # ── Advanced Diagnostics 配置 ──────────────────────────────────────────
+    advanced_peer_factors:        Optional[List[str]] = None
+    advanced_min_cs_nobs:         int = 20
+    advanced_corr_method:         str = "spearman"  # spearman / pearson
+    advanced_high_corr_threshold: float = 0.7
+    advanced_nw_lag_rule:         str = "t_pow_0.25"  # t_pow_0.25 / fixed_N
+    advanced_enable_wide_output:  bool = True
+
     # ── 元数据（不参与稳定哈希）─────────────────────────────────────────
     schema_version:  str                = CURRENT_SCHEMA_VERSION
     symbols:         Optional[List[str]] = None          # 大列表，不计入哈希
@@ -243,6 +251,13 @@ class ResearchConfig:
         force_exit_on_universe_drop: bool = True,
         universe_file:               Optional[str] = None,
         universe_cache_dir:          str = "cache/universe/",
+        # ── advanced diagnostics ──────────────────────────────────────────
+        advanced_peer_factors:       Optional[List[str]] = None,
+        advanced_min_cs_nobs:        int = 20,
+        advanced_corr_method:        str = "spearman",
+        advanced_high_corr_threshold: float = 0.7,
+        advanced_nw_lag_rule:        str = "t_pow_0.25",
+        advanced_enable_wide_output: bool = True,
         **_ignored,
     ) -> "ResearchConfig":
         """
@@ -277,6 +292,12 @@ class ResearchConfig:
             force_exit_on_universe_drop = force_exit_on_universe_drop,
             universe_file               = universe_file,
             universe_cache_dir          = universe_cache_dir,
+            advanced_peer_factors       = advanced_peer_factors,
+            advanced_min_cs_nobs        = advanced_min_cs_nobs,
+            advanced_corr_method        = advanced_corr_method,
+            advanced_high_corr_threshold= advanced_high_corr_threshold,
+            advanced_nw_lag_rule        = advanced_nw_lag_rule,
+            advanced_enable_wide_output = advanced_enable_wide_output,
         )
 
     # ── 序列化 ────────────────────────────────────────────────────────────
@@ -312,46 +333,58 @@ class ResearchConfig:
         ValueError : factor_name 为空，或参数超出合理范围
         """
         if not self.factor_name:
-            raise ValueError("ResearchConfig.factor_name 不能为空。")
+            raise ValueError("ResearchConfig.factor_name cannot be empty.")
         if self.forward < 1:
-            raise ValueError(f"forward={self.forward} 必须 ≥ 1。")
+            raise ValueError(f"forward={self.forward} must be >= 1.")
         if self.n_groups < 2:
-            raise ValueError(f"n_groups={self.n_groups} 必须 ≥ 2。")
+            raise ValueError(f"n_groups={self.n_groups} must be >= 2.")
         if self.direction not in (1, -1):
-            raise ValueError(f"direction={self.direction} 必须为 +1 或 -1。")
+            raise ValueError(f"direction={self.direction} must be +1 or -1.")
         if self.standardize not in ("rank", "zscore", None):
             raise ValueError(
-                f"standardize={self.standardize!r} 不合法，"
-                "请选择 'rank'、'zscore' 或 None。"
+                f"standardize={self.standardize!r} is invalid; "
+                "choose 'rank', 'zscore', or None."
             )
         if self.ic_method not in ("rank", "normal"):
             raise ValueError(
-                f"ic_method={self.ic_method!r} 不合法，"
-                "请选择 'rank' 或 'normal'。"
+                f"ic_method={self.ic_method!r} is invalid; "
+                "choose 'rank' or 'normal'."
             )
         # ── Universe 字段校验 ─────────────────────────────────────────────
         _valid_modes = {"all", "static_file", "topn_mktcap_dynamic"}
         if self.universe_mode not in _valid_modes:
             raise ValueError(
-                f"universe_mode={self.universe_mode!r} 不合法，"
-                f"可选: {sorted(_valid_modes)}"
+                f"universe_mode={self.universe_mode!r} is invalid; "
+                f"allowed: {sorted(_valid_modes)}"
             )
         _valid_metrics = {"total_mktcap", "free_float_mktcap"}
         if self.universe_metric not in _valid_metrics:
             raise ValueError(
-                f"universe_metric={self.universe_metric!r} 不合法，"
-                f"可选: {sorted(_valid_metrics)}"
+                f"universe_metric={self.universe_metric!r} is invalid; "
+                f"allowed: {sorted(_valid_metrics)}"
             )
         if self.universe_mode == "static_file" and not self.universe_file and not self.universe_name:
             raise ValueError(
-                "universe_mode='static_file' 时必须指定 universe_file 或 universe_name。"
+                "universe_mode='static_file' requires universe_file or universe_name."
             )
         if self.universe_top_n < 1:
-            raise ValueError(f"universe_top_n={self.universe_top_n} 必须 ≥ 1。")
+            raise ValueError(f"universe_top_n={self.universe_top_n} must be >= 1.")
         if self.universe_effective_lag_days < 0:
             raise ValueError(
-                f"universe_effective_lag_days={self.universe_effective_lag_days} 不能为负数。"
+                f"universe_effective_lag_days={self.universe_effective_lag_days} cannot be negative."
             )
+        # ── Advanced Diagnostics 字段校验 ────────────────────────────────
+        if self.advanced_min_cs_nobs < 1:
+            raise ValueError("advanced_min_cs_nobs must be >= 1.")
+        if self.advanced_corr_method not in ("spearman", "pearson"):
+            raise ValueError("advanced_corr_method supports only 'spearman' or 'pearson'.")
+        if not (0 <= self.advanced_high_corr_threshold <= 1):
+            raise ValueError("advanced_high_corr_threshold must be in [0, 1].")
+        if not (
+            self.advanced_nw_lag_rule == "t_pow_0.25"
+            or self.advanced_nw_lag_rule.startswith("fixed_")
+        ):
+            raise ValueError("advanced_nw_lag_rule supports only 't_pow_0.25' or 'fixed_N'.")
         return self
 
     def __repr__(self) -> str:
