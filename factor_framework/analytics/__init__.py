@@ -31,6 +31,11 @@ from factor_framework.analytics.ic_analysis import (
 )
 from factor_framework.analytics.ic_analyzer import ICAnalyzer
 from factor_framework.analytics.layer_backtester import LayerBacktester
+from factor_framework.analytics.ic_decay_diagnostics import (
+    ICDecayDiagnostics,
+    DiagnosticReport,
+    DiagnosticResult,
+)
 
 __all__ = [
     # ic_analysis
@@ -44,4 +49,8 @@ __all__ = [
     # wrappers
     "ICAnalyzer",
     "LayerBacktester",
+    # diagnostics
+    "ICDecayDiagnostics",
+    "DiagnosticReport",
+    "DiagnosticResult",
 ]

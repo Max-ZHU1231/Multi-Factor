@@ -30,8 +30,13 @@ df 为单只股票的日频 DataFrame（已清洗，按交易日升序）。
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from factor_framework.factors.registry import _CompatDict
 
 from factor_framework.operators import (
     delay, ts_mean, ts_stddev, ts_sum, ts_corr,
@@ -450,7 +455,7 @@ def _register_builtins() -> "_CompatDict":
     # Import sub-modules directly (not the factors package) to avoid
     # triggering factors/__init__.py while factor_zoo is mid-initialisation.
     from factor_framework.factors.meta import FactorMeta, FactorCategory, FactorStatus
-    from factor_framework.factors.registry import REGISTRY
+    from factor_framework.factors.registry import REGISTRY, _CompatDict
 
     C  = FactorCategory
     St = FactorStatus

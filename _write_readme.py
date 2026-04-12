@@ -1,6 +1,7 @@
+content = """\
 # Multi Factor — A-share Multi-Factor Research Framework
 
-> **v4.0.0rc1** · Python 3.10+ · 239 tests passing · Phase A/B/C/D/E1/E2 complete · IC Decay Diagnostics integrated
+> **v4.0.0rc1** · Python 3.10+ · 239 tests passing · Phase A/B/C/D/E1/E2 complete
 
 A production-grade quantitative research framework for Chinese A-share markets.
 Build factor panels, run IC analysis, perform layer backtests, and assemble
@@ -15,7 +16,7 @@ multi-factor composites — all through a single unified CLI or clean Python API
 git clone <repo-url>
 cd "Multi Factor"
 python -m venv .venv
-.venv\Scripts\activate
+.venv\\Scripts\\activate
 pip install -e ".[dev]"
 
 # 2. Single factor: IC analysis + layered backtest
@@ -44,10 +45,9 @@ Also: `python -m factor_framework.cli single --factor momentum_12_1`
 | Command | Description |
 |---------|-------------|
 | `mf single --factor NAME [NAME ...]` | IC + layered backtest for one or more factors |
-| `mf single --factor NAME --ic-decay-diagnostics` | 回测后自动运行 6 模块 IC 衰减诊断 |
 | `mf batch [--factors NAME ...]` | Run all 28 factors or a named subset |
-| `mf validate --suite {lookahead\|quality\|all}` | Run validation suites |
-| `mf cache {info\|gc\|clear}` | Cache management |
+| `mf validate --suite {lookahead\\|quality\\|all}` | Run validation suites |
+| `mf cache {info\\|gc\\|clear}` | Cache management |
 
 Exit codes: **0** success · **1** runtime error · **2** argument error
 
@@ -91,45 +91,6 @@ from factor_framework.manifest import RunManifest
 m = RunManifest.load("artifacts/run_manifest.json")
 m.print_summary()   # run_id, config_hash, git_sha, cache_stats, key_metrics
 ```
-
----
-
-## IC 衰减异常诊断（6 模块）
-
-当观察到 `forward` 越长、`IC` 越高的"反常"形态时，使用内置诊断框架定位根因。
-
-```bash
-# CLI 一键诊断
-mf single --factor value_pb --ic-decay-diagnostics
-```
-
-```python
-# Python API
-from factor_framework.analytics.ic_decay_diagnostics import ICDecayDiagnostics
-
-diag = ICDecayDiagnostics(
-    factor_panel = factor_panel,   # 日频，未经 T+1 shift
-    price_panel  = price_panel,    # 后复权收盘价
-    forward_list = [1, 5, 10, 21, 60],
-    industry_map = engine.industry_map,
-    mktcap_panel = mktcap_panel,
-)
-report = diag.run_all()
-report.print_full()
-```
-
-**6 个诊断模块**：
-
-| 模块 | 检查内容 | 排查根因 |
-|------|---------|---------|
-| M1 | lag=0/1/2 IC 对比 | 前瞻偏差 |
-| M2 | 累计 IC vs 增量 IC | 统计放大效应 |
-| M3 | 市值/行业中性化后 IC | 结构暴露驱动 |
-| M4 | 各 forward 样本覆盖率 | 生存偏差 |
-| M5 | 因子自相关半衰期 | 时效性不匹配 |
-| M6 | 子期/参数/Regime 稳健性 | 时间不稳定 |
-
-> 📖 完整文档：[docs/IC_DECAY_DIAGNOSTICS_GUIDE.md](docs/IC_DECAY_DIAGNOSTICS_GUIDE.md)
 
 ---
 
@@ -221,3 +182,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full per-phase details.
 ## License
 
 MIT
+"""
+with open("README.md", "w", encoding="utf-8") as f:
+    f.write(content)
+print("OK")

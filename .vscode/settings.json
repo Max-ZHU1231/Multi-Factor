@@ -1,5 +1,10 @@
 {
     "github.copilot.advanced": {
         "chat.tools.autoApprove": true,
-    }
+    },
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}"
+    ],
+    "python-envs.pythonProjects": []
 }

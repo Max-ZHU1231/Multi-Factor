@@ -56,6 +56,13 @@ from factor_framework.engine.cache         import CacheLayer
 from factor_framework.engine.panel_builder import PanelBuilder
 from factor_framework.research_config      import ResearchConfig
 
+# IC 衰减诊断（懒加载，避免循环依赖）
+def _lazy_diagnostics():
+    from factor_framework.analytics.ic_decay_diagnostics import (
+        ICDecayDiagnostics, DiagnosticReport,
+    )
+    return ICDecayDiagnostics, DiagnosticReport
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 工具函数
@@ -116,6 +123,104 @@ def _resample_monthly(
     return f_m.loc[valid], r_m.loc[valid]
 
 
+def _save_diag_report(report: object, out_dir: Path) -> None:
+    """
+    将 DiagnosticReport 的所有证据保存为标准化 CSV + JSON。
+
+    目录结构
+    --------
+    out_dir/
+      diagnostic_overview.csv          — 6 模块状态汇总
+      final_judgement.json             — 最终结论与风险等级
+      module1_alignment_audit.csv
+      module2_incremental_ic.csv       — incr_ic_full DataFrame
+      module2_cumulative_ic.csv
+      module3_neutralized_compare.csv
+      module4_survivorship_audit.csv
+      module5_factor_horizon_profile.csv
+      module5_incr_ic_by_k.csv
+      module6_split_period_ic.csv
+      module6_winsor_sensitivity.csv
+      module6_regime_ic.csv
+    """
+    import json
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── 汇总表 ────────────────────────────────────────────────────────────────
+    overview_rows = []
+    for r in report.results:
+        overview_rows.append({
+            "module_id":   r.module_id,
+            "module_name": r.module_name,
+            "passed":      r.passed,
+            "risk_level":  r.risk_level,
+            "conclusion":  r.conclusion,
+        })
+    pd.DataFrame(overview_rows).to_csv(out_dir / "diagnostic_overview.csv", index=False)
+
+    # ── 最终判定 JSON ─────────────────────────────────────────────────────────
+    fails = [r for r in report.results if r.passed is False]
+    high_risk = [r for r in report.results if r.risk_level == "HIGH"]
+    if len(fails) == 0:
+        verdict, risk = "真实中期有效（所有模块通过）", "LOW"
+    elif any(r.module_id in (1, 2) for r in fails):
+        verdict, risk = "实现偏差（时间对齐/累计统计问题）", "HIGH"
+    elif len(fails) >= 3:
+        verdict, risk = "多因素混合偏差", "HIGH"
+    elif high_risk:
+        verdict, risk = "结构暴露驱动", "MEDIUM"
+    else:
+        verdict, risk = "部分合理（建议进一步分析）", "MEDIUM"
+
+    final = {
+        "factor_name":   report.factor_name,
+        "verdict":       verdict,
+        "risk_level":    risk,
+        "pass_count":    sum(1 for r in report.results if r.passed is True),
+        "total_modules": len(report.results),
+        "failed_modules": [f"M{r.module_id}" for r in fails],
+    }
+    with open(out_dir / "final_judgement.json", "w", encoding="utf-8") as f:
+        json.dump(final, f, ensure_ascii=False, indent=2)
+
+    # ── 各模块证据文件 ────────────────────────────────────────────────────────
+    _MODULE_FILE_MAP = {
+        1: [("evidence", "module1_alignment_audit.csv")],
+        2: [("cumul_ic",       "module2_cumulative_ic.csv"),
+            ("incr_ic_full",   "module2_incremental_ic.csv")],
+        3: [("evidence",       "module3_neutralized_compare.csv")],
+        4: [("evidence",       "module4_survivorship_audit.csv")],
+        5: [("autocorr_by_lag_month",    "module5_factor_horizon_profile.csv"),
+            ("incr_ic_by_k",             "module5_incr_ic_by_k.csv")],
+        6: [("split_period_ic",    "module6_split_period_ic.csv"),
+            ("winsor_sensitivity", "module6_winsor_sensitivity.csv"),
+            ("regime_ic",          "module6_regime_ic.csv")],
+    }
+
+    for r in report.results:
+        mappings = _MODULE_FILE_MAP.get(r.module_id, [])
+        for ev_key, filename in mappings:
+            # evidence 可能是 dict 或直接 DataFrame
+            if isinstance(r.evidence, dict):
+                ev = r.evidence.get(ev_key)
+            elif ev_key == "evidence":
+                ev = r.evidence
+            else:
+                ev = None
+            if ev is None:
+                continue
+            try:
+                if isinstance(ev, pd.DataFrame):
+                    ev.to_csv(out_dir / filename)
+                elif isinstance(ev, pd.Series):
+                    ev.to_frame().to_csv(out_dir / filename)
+            except Exception as _exc:
+                warnings.warn(f"[diagnostics] 保存 {filename} 失败: {_exc}")
+
+    print(f"[OK] IC 衰减诊断报告已保存至 {out_dir}/")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 报告对象
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -136,6 +241,9 @@ class FactorReport:
         factor_panel:      pd.DataFrame,
         return_panel:      pd.DataFrame,
         composite_weights: Optional[Dict[str, float]] = None,
+        price_panel:       Optional[pd.DataFrame] = None,
+        mktcap_panel:      Optional[pd.DataFrame] = None,
+        industry_map:      Optional[pd.Series] = None,
     ):
         self.factor_name       = factor_name
         self.ic_series         = ic_series
@@ -148,6 +256,69 @@ class FactorReport:
         self.turnover     = turnover
         self.factor_panel = factor_panel
         self.return_panel = return_panel
+        # 诊断所需的补充面板（由 run(run_ic_decay_diagnostics=True) 时传入）
+        self.price_panel  = price_panel
+        self.mktcap_panel = mktcap_panel
+        self.industry_map = industry_map
+        # 诊断报告（运行后缓存，避免重复计算）
+        self._diag_report: Optional[object] = None  # DiagnosticReport | None
+
+    # ── IC 衰减诊断 ───────────────────────────────────────────────────────────
+
+    def run_ic_diagnostics(
+        self,
+        forward_list: List[int] = (1, 5, 10, 21, 60),
+        run_modules:  Optional[List[int]] = None,
+        verbose:      bool = True,
+        save_dir:     Optional[str | Path] = None,
+    ) -> object:  # DiagnosticReport（懒加载，避免循环导入）
+        """
+        对本次回测结果运行 IC 衰减异常诊断（6 模块）。
+
+        Parameters
+        ----------
+        forward_list : 诊断用预测期列表（默认与 ic_forward_list 一致）
+        run_modules  : 指定运行哪些模块（默认全部 1-6）
+        verbose      : 是否打印完整报告
+        save_dir     : 若指定，自动保存诊断结果到该目录
+
+        Returns
+        -------
+        DiagnosticReport
+
+        Notes
+        -----
+        需要 ``price_panel``（原始收盘价）可用。
+        通过 ``pipe.run(..., run_ic_decay_diagnostics=True)`` 自动填充，
+        或手动调用 ``report.price_panel = price_df`` 后再调用此方法。
+        """
+        if self.price_panel is None:
+            raise ValueError(
+                "run_ic_diagnostics() 需要 price_panel。\n"
+                "请使用 pipe.run(..., run_ic_decay_diagnostics=True) 或手动赋值 "
+                "report.price_panel = price_df 后再调用。"
+            )
+
+        ICDecayDiagnostics, _ = _lazy_diagnostics()
+        diag = ICDecayDiagnostics(
+            factor_panel = self.factor_panel,
+            price_panel  = self.price_panel,
+            forward_list = list(forward_list),
+            industry_map = self.industry_map,
+            mktcap_panel = self.mktcap_panel,
+            ic_method    = "rank",
+            factor_name  = self.factor_name,
+        )
+        report = diag.run_all(
+            run_modules = run_modules,
+            verbose     = verbose,
+        )
+        self._diag_report = report
+
+        if save_dir is not None:
+            _save_diag_report(report, Path(save_dir))
+
+        return report
 
     # ── 打印汇总 ──────────────────────────────────────────────────────────────
 
@@ -246,7 +417,11 @@ class FactorReport:
                    "avg_cost":         self.turnover.get("avg_cost"),
                    }
         pd.DataFrame([summary]).to_csv(out / "summary.csv", index=False)
-        print(f"✓ 报告已保存至 {out}/")
+        print(f"[OK] 报告已保存至 {out}/")
+
+        # ── 若诊断报告已运行，自动保存到 ic_decay_diagnostics/ 子目录 ───────
+        if self._diag_report is not None:
+            _save_diag_report(self._diag_report, out / "ic_decay_diagnostics")
 
     # ── 属性便捷访问 ─────────────────────────────────────────────────────────
 
@@ -381,6 +556,7 @@ class FactorPipeline:
         symbols:          Optional[List[str]] = None,
         resample_monthly: bool = True,               # 月度重采样（推荐）
         config:           Optional[ResearchConfig] = None,  # Phase C: 结构化配置
+        run_ic_decay_diagnostics: bool = False,      # 是否在回测后运行 IC 衰减诊断
     ) -> FactorReport:
         """
         执行完整的因子检验流程。
@@ -539,6 +715,33 @@ class FactorPipeline:
             method=ic_method,
         )
 
+        # ── 诊断所需面板（在 resample 前取原始日频数据）────────────────────
+        # run_ic_decay_diagnostics=True 时，将 price_panel / mktcap_panel 传给 report
+        _diag_price_panel  = None
+        _diag_mktcap_panel = None
+        _diag_industry_map = None
+        _diag_factor_panel_raw = None  # 诊断需要未经 resample 的因子面板
+        if run_ic_decay_diagnostics:
+            try:
+                self.engine.register("__close_diag__", lambda df: df["收盘价"])
+                _diag_price_panel = self._builder.build_panel(
+                    "__close_diag__", start=start, end=end, symbols=symbols
+                )
+                del self.engine._registry["__close_diag__"]
+            except Exception as _pe:
+                warnings.warn(f"[diagnostics] 无法获取 price_panel: {_pe}")
+            try:
+                self.engine.register("__mktcap_diag__", lambda df: df["总市值（万元）"])
+                _diag_mktcap_panel = self._builder.build_panel(
+                    "__mktcap_diag__", start=start, end=end, symbols=symbols
+                )
+                del self.engine._registry["__mktcap_diag__"]
+            except Exception:
+                pass
+            _diag_industry_map = self.engine.industry_map
+            # 保存 resample 前的日频因子面板（诊断模块需要原始日频）
+            _diag_factor_panel_raw = factor_panel.copy()
+
         # ── 月度重采样（可选，在截面预处理和 IC 衰减之后）──────────────────
         # BUG 13/15 NOTE: 月度重采样后 factor_panel/return_panel 为月末截面，
         # layer_backtest 和 turnover_analysis 中每行对应一个月，不存在日频滚动重叠。
@@ -579,7 +782,26 @@ class FactorPipeline:
             turnover     = turnover_,
             factor_panel = factor_panel,
             return_panel = return_panel,
+            price_panel  = _diag_price_panel,
+            mktcap_panel = _diag_mktcap_panel,
+            industry_map = _diag_industry_map,
         )
+
+        # ── IC 衰减诊断（可选）──────────────────────────────────────────────
+        if run_ic_decay_diagnostics and _diag_price_panel is not None:
+            print(f"\n[+] IC 衰减诊断（6 模块）...")
+            try:
+                # 诊断模块使用日频原始因子面板（resample 前），不含 T+1
+                # _diag_factor_panel_raw 已经过 winsorize/neutralize/standardize
+                # 但未经 T+1 shift（诊断模块内部按需 shift）
+                report.factor_panel = _diag_factor_panel_raw if _diag_factor_panel_raw is not None else factor_panel
+                diag_report = report.run_ic_diagnostics(
+                    forward_list = list(ic_forward_list),
+                    verbose      = True,
+                )
+                # save() 时自动保存到 ic_decay_diagnostics/ 子目录
+            except Exception as _de:
+                warnings.warn(f"[diagnostics] IC 衰减诊断运行失败（非致命）: {_de}")
 
         # ── Phase D: 生成 RunManifest ─────────────────────────────────────
         try:
@@ -597,7 +819,7 @@ class FactorPipeline:
         except Exception as _mex:
             warnings.warn(f"[manifest] 生成失败（非致命）: {_mex}")
 
-        print("\n✓ 流程完成。")
+        print("\n[OK] 流程完成。")
         return report
 
     # ── 批量多因子运行（面板预构建版）──────────────────────────────────────────
@@ -965,5 +1187,5 @@ class FactorPipeline:
             composite_weights  = weights,
         )
 
-        print("\n✓ 多因子合成流程完成。")
+        print("\n[OK] 多因子合成流程完成。")
         return report

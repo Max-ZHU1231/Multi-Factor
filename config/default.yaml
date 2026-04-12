@@ -9,6 +9,23 @@
 #
 # 修改本文件即可改变所有分析脚本的默认行为，无需改代码。
 
+# ── 股票池 ──────────────────────────────────────────────────────────────────
+# universe_mode 可选值：
+#   "all"                 — 全部股票（默认，使用 stocks/ 下所有 CSV）
+#   "static_file"         — 静态文件（universe_name: hs300 或 universe_file: path）
+#   "topn_mktcap_dynamic" — 动态市值前 N 股票池（每半年更新，防未来函数）
+universe:
+  name:                null           # 静态股票池别名（null=不指定；hs300 等）
+  mode:                "all"          # all / static_file / topn_mktcap_dynamic
+  top_n:               500            # 动态池入选数量
+  metric:              "total_mktcap" # total_mktcap / free_float_mktcap
+  rebalance_freq:      "semiannual"   # semiannual / annual / quarterly
+  rebalance_months:    null           # null=由 rebalance_freq 自动推断；或 [6, 12]
+  effective_lag_days:  1              # T 日决策，T+lag 日生效（默认 1）
+  force_exit_on_drop:  true           # 掉池持仓是否强制换仓
+  file:                null           # static_file 模式：自定义 CSV 路径
+  cache_dir:           "cache/universe/"  # 动态池快照缓存目录
+
 # ── 数据路径 ────────────────────────────────────────────────────────────────
 data:
   stocks_dir:  "Stocks/"                   # 股票日频 CSV 目录
@@ -35,7 +52,7 @@ backtest:
 preprocess:
   winsorize:   true    # 截面 MAD Winsorize
   standardize: "rank"  # 横截面标准化：rank / zscore / null
-  neutralize:  false   # 市值+行业中性化
+  neutralize:  true   # 市值+行业中性化
 
 # ── IC 分析 ─────────────────────────────────────────────────────────────────
 ic:

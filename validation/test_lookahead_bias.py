@@ -52,6 +52,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from factor_framework.factor_engine import FactorEngine
+
 # ── 确保项目根目录在 sys.path ────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent   # validation/ -> project root
 if str(ROOT) not in sys.path:

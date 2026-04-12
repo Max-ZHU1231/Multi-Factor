@@ -175,6 +175,22 @@ class ResearchConfig:
     cost_per_side:    float = 0.002
     resample_monthly: bool  = True
 
+    # ── 股票池（Universe）配置 ────────────────────────────────────────────
+    # universe_mode:
+    #   "all"                  → 不限制（默认）
+    #   "static_file"          → 读取 universe_file 指定的静态 CSV
+    #   "topn_mktcap_dynamic"  → 动态市值前 N 股票池
+    universe_mode:               str            = "all"
+    universe_name:               Optional[str]  = None    # 静态别名（hs300 等）
+    universe_top_n:              int            = 500
+    universe_metric:             str            = "total_mktcap"   # or "free_float_mktcap"
+    universe_rebalance_freq:     str            = "semiannual"
+    universe_rebalance_months:   Optional[List[int]] = None        # None = 由 freq 推断
+    universe_effective_lag_days: int            = 1
+    force_exit_on_universe_drop: bool           = True
+    universe_file:               Optional[str]  = None    # static_file 模式用
+    universe_cache_dir:          str            = "cache/universe/"
+
     # ── 元数据（不参与稳定哈希）─────────────────────────────────────────
     schema_version:  str                = CURRENT_SCHEMA_VERSION
     symbols:         Optional[List[str]] = None          # 大列表，不计入哈希
@@ -216,6 +232,17 @@ class ResearchConfig:
         cost_per_side:    float = 0.002,
         symbols:          Optional[List[str]] = None,
         resample_monthly: bool = True,
+        # ── universe ──────────────────────────────────────────────────────
+        universe_mode:               str = "all",
+        universe_name:               Optional[str] = None,
+        universe_top_n:              int = 500,
+        universe_metric:             str = "total_mktcap",
+        universe_rebalance_freq:     str = "semiannual",
+        universe_rebalance_months:   Optional[List[int]] = None,
+        universe_effective_lag_days: int = 1,
+        force_exit_on_universe_drop: bool = True,
+        universe_file:               Optional[str] = None,
+        universe_cache_dir:          str = "cache/universe/",
         **_ignored,
     ) -> "ResearchConfig":
         """
@@ -240,6 +267,16 @@ class ResearchConfig:
             cost_per_side    = cost_per_side,
             symbols          = symbols,
             resample_monthly = resample_monthly,
+            universe_mode               = universe_mode,
+            universe_name               = universe_name,
+            universe_top_n              = universe_top_n,
+            universe_metric             = universe_metric,
+            universe_rebalance_freq     = universe_rebalance_freq,
+            universe_rebalance_months   = universe_rebalance_months,
+            universe_effective_lag_days = universe_effective_lag_days,
+            force_exit_on_universe_drop = force_exit_on_universe_drop,
+            universe_file               = universe_file,
+            universe_cache_dir          = universe_cache_dir,
         )
 
     # ── 序列化 ────────────────────────────────────────────────────────────
@@ -258,6 +295,7 @@ class ResearchConfig:
         - 排序所有键（保证 JSON 序列化字节顺序确定）
         - 去掉瞬时字段（symbols、ic_forward_list）
         - 保留 schema_version（用于跨版本哈希隔离）
+        - 包含所有 universe_* 字段（影响回测结果，须计入哈希）
         """
         _TRANSIENT = {"symbols", "ic_forward_list"}
         d = {k: v for k, v in self.to_dict().items() if k not in _TRANSIENT}
@@ -291,13 +329,41 @@ class ResearchConfig:
                 f"ic_method={self.ic_method!r} 不合法，"
                 "请选择 'rank' 或 'normal'。"
             )
+        # ── Universe 字段校验 ─────────────────────────────────────────────
+        _valid_modes = {"all", "static_file", "topn_mktcap_dynamic"}
+        if self.universe_mode not in _valid_modes:
+            raise ValueError(
+                f"universe_mode={self.universe_mode!r} 不合法，"
+                f"可选: {sorted(_valid_modes)}"
+            )
+        _valid_metrics = {"total_mktcap", "free_float_mktcap"}
+        if self.universe_metric not in _valid_metrics:
+            raise ValueError(
+                f"universe_metric={self.universe_metric!r} 不合法，"
+                f"可选: {sorted(_valid_metrics)}"
+            )
+        if self.universe_mode == "static_file" and not self.universe_file and not self.universe_name:
+            raise ValueError(
+                "universe_mode='static_file' 时必须指定 universe_file 或 universe_name。"
+            )
+        if self.universe_top_n < 1:
+            raise ValueError(f"universe_top_n={self.universe_top_n} 必须 ≥ 1。")
+        if self.universe_effective_lag_days < 0:
+            raise ValueError(
+                f"universe_effective_lag_days={self.universe_effective_lag_days} 不能为负数。"
+            )
         return self
 
     def __repr__(self) -> str:
+        mode_tag = (
+            f"top{self.universe_top_n}" if self.universe_mode == "topn_mktcap_dynamic"
+            else self.universe_name or self.universe_mode
+        )
         return (
             f"ResearchConfig("
             f"factor_name={self.factor_name!r}, "
             f"start={self.start!r}, end={self.end!r}, "
             f"forward={self.forward}, n_groups={self.n_groups}, "
+            f"universe={mode_tag!r}, "
             f"schema_version={self.schema_version!r})"
         )

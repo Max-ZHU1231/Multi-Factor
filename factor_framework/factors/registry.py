@@ -88,7 +88,7 @@ class AuditReport:
         print(sep)
 
         if not self.rows:
-            print("  ✓ 所有因子 E1 元数据均已完整填写。")
+            print("  [OK] 所有因子 E1 元数据均已完整填写。")
         else:
             # 按缺失字段数（多→少）排序
             sorted_rows = sorted(self.rows, key=lambda r: -len(r["missing"]))

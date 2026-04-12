@@ -67,6 +67,19 @@ def _load_cfg(args: argparse.Namespace):
     if getattr(args, "forward",  None): overrides["backtest.forward"]  = args.forward
     if getattr(args, "n_groups", None): overrides["backtest.n_groups"] = args.n_groups
     if getattr(args, "no_cache", False): overrides["cache.cache_dir"]  = None
+    # ── universe overrides ────────────────────────────────────────────────────
+    if getattr(args, "universe",       None): overrides["universe.name"]              = args.universe
+    if getattr(args, "universe_mode",  None): overrides["universe.mode"]              = args.universe_mode
+    if getattr(args, "universe_top_n", None): overrides["universe.top_n"]             = args.universe_top_n
+    if getattr(args, "universe_metric",None): overrides["universe.metric"]            = args.universe_metric
+    if getattr(args, "universe_rebalance_freq", None):
+        overrides["universe.rebalance_freq"] = args.universe_rebalance_freq
+    if getattr(args, "universe_effective_lag_days", None) is not None:
+        overrides["universe.effective_lag_days"] = args.universe_effective_lag_days
+    force_exit = getattr(args, "force_exit_on_universe_drop", None)
+    if force_exit is not None:
+        overrides["universe.force_exit_on_drop"] = force_exit
+    # ─────────────────────────────────────────────────────────────────────────
     if getattr(args, "output",   None):
         cmd = getattr(args, "command", "single")
         key = "output.batch" if cmd == "batch" else "output.factor_analysis"
@@ -90,15 +103,60 @@ def _make_pipe(cfg, root: Path = _ROOT):
 
 
 def _print_header(title: str, cfg) -> None:
+    uni = getattr(cfg, "universe", None)
+    uni_mode = getattr(uni, "mode", "all") or "all"
+    uni_name = getattr(uni, "name", None)
+    if uni_mode == "topn_mktcap_dynamic":
+        top_n  = getattr(uni, "top_n",  500)
+        metric = getattr(uni, "metric", "total_mktcap")
+        freq   = getattr(uni, "rebalance_freq", "semiannual")
+        uni_display = f"topn_dynamic (top={top_n}, metric={metric}, freq={freq})"
+    elif uni_name:
+        uni_display = uni_name
+    else:
+        uni_display = uni_mode
     print("\n" + "=" * 64)
     print(f"  {title}")
     print("=" * 64)
     print(f"  数据目录  : {cfg.data.stocks_dir}")
+    print(f"  股票池    : {uni_display}")
     print(f"  时间范围  : {cfg.backtest.start} ~ {cfg.backtest.end}")
     print(f"  预测期    : {cfg.backtest.forward} 天")
     print(f"  分层数    : {cfg.backtest.n_groups}")
     print(f"  缓存目录  : {cfg.cache.cache_dir}")
     print("=" * 64 + "\n")
+
+
+def _resolve_universe(cfg, root: Path = _ROOT):
+    """
+    从配置中解析股票池，返回 ts_code 列表（静态模式）、
+    UniverseMembership 对象（动态模式）或 None（全部股票）。
+
+    返回值类型：
+      None                  → 全部股票
+      list[str]             → 静态股票池（static_file / hs300 等）
+      UniverseMembership    → 动态股票池（topn_mktcap_dynamic）
+    """
+    uni = getattr(cfg, "universe", None)
+    mode = getattr(uni, "mode", "all") or "all"
+    name = getattr(uni, "name", None)
+
+    try:
+        if mode == "topn_mktcap_dynamic":
+            from universes.membership import build_membership_from_config
+            return build_membership_from_config(cfg, root=root, verbose=True)
+
+        # static_file 或 all（name 可能指向 hs300 等）
+        from universes.loader import UniverseLoader
+        # name 优先于 mode
+        universe_key = name if name else (None if mode == "all" else mode)
+        stocks_dir = root / cfg.data.stocks_dir
+        return UniverseLoader.load(universe_key, stocks_dir=stocks_dir)
+
+    except Exception as exc:
+        import warnings as _w
+        _w.warn(f"[universe] 股票池加载失败，将使用全部股票: {exc}")
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -157,6 +215,26 @@ def _cmd_single(args: argparse.Namespace) -> int:
         pipe = _make_pipe(cfg)
         pipe.register_builtins(args.factor)
 
+        universe = _resolve_universe(cfg)
+        # Unwrap dynamic membership to a flat symbol list for the panel builder.
+        # The membership object is also kept for potential panel filtering later.
+        from universes.membership import UniverseMembership as _UMem
+        if isinstance(universe, _UMem):
+            membership = universe
+            # Collect all symbols that ever appeared in the universe
+            symbols = sorted({s for syms in membership.get_schedule().values() for s in syms})
+            uni_display = f"{len(symbols)} 只（动态池）"
+        elif universe is not None:
+            membership = None
+            symbols = universe
+            uni_display = f"{len(symbols)} 只"
+        else:
+            membership = None
+            symbols = None
+            uni_display = "全部"
+        if not getattr(args, "quiet", False):
+            print(f"  股票池    : {uni_display}")
+
         out_base = Path(
             getattr(args, "output", None) or cfg.output.factor_analysis
         )
@@ -184,9 +262,26 @@ def _cmd_single(args: argparse.Namespace) -> int:
                     rf               = cfg.backtest.rf,
                     cost_per_side    = cfg.backtest.cost_per_side,
                     resample_monthly = cfg.backtest.resample_monthly,
+                    symbols          = symbols,
                 )
-                report = pipe.run(config=rc)
+                _run_diag = getattr(args, "ic_decay_diagnostics", False)
+                report = pipe.run(
+                    config=rc,
+                    run_ic_decay_diagnostics=_run_diag,
+                )
                 report.print_summary()
+                # ── IC 衰减诊断（--ic-decay-diagnostics 标志）──────────────
+                if _run_diag and report._diag_report is None:
+                    # pipeline 内部诊断未能运行（price_panel 获取失败），在 CLI 层补充尝试
+                    diag_dir = factor_out / "ic_decay_diagnostics"
+                    try:
+                        diag_report = report.run_ic_diagnostics(
+                            forward_list = list(rc.ic_forward_list),
+                            verbose      = True,
+                            save_dir     = diag_dir,
+                        )
+                    except Exception as _de:
+                        _err(f"IC 衰减诊断失败（非致命）: {_de}")
                 report.save(factor_out)
                 results.append(factor_name)
             except Exception as exc:
@@ -239,6 +334,23 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         pipe = _make_pipe(cfg)
         pipe.register_builtins()
 
+        universe = _resolve_universe(cfg)
+        from universes.membership import UniverseMembership as _UMem
+        if isinstance(universe, _UMem):
+            membership = universe
+            symbols = sorted({s for syms in membership.get_schedule().values() for s in syms})
+            uni_display = f"{len(symbols)} 只（动态池）"
+        elif universe is not None:
+            membership = None
+            symbols = universe
+            uni_display = f"{len(symbols)} 只"
+        else:
+            membership = None
+            symbols = None
+            uni_display = "全部"
+        if not getattr(args, "quiet", False):
+            print(f"  股票池    : {uni_display}")
+
         factor_list = getattr(args, "factors", None) or list(BUILTIN_FACTORS.keys())
         out_dir = Path(getattr(args, "output", None) or cfg.output.batch)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -264,6 +376,7 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                     rf               = cfg.backtest.rf,
                     cost_per_side    = cfg.backtest.cost_per_side,
                     resample_monthly = cfg.backtest.resample_monthly,
+                    symbols          = symbols,
                 )
                 report = pipe.run(config=rc)
                 s = report.summary_dict
@@ -279,7 +392,7 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             df = pd.DataFrame(summaries).set_index("factor")
             csv_path = out_dir / "factor_screening_summary.csv"
             df.to_csv(csv_path)
-            print(f"\n✓ IC 汇总表已保存：{csv_path}")
+            print(f"\n[OK] IC 汇总表已保存：{csv_path}")
 
         n_ok = len(summaries) - len(failures)
         print(f"\n完成：{n_ok}/{len(summaries)} 个因子成功，{len(failures)} 个跳过。")
@@ -361,7 +474,7 @@ def _cmd_cache(args: argparse.Namespace) -> int:
         for t in targets:
             shutil.rmtree(t)
             print(f"  已删除: {t.name}")
-        print(f"✓ 已清除 {len(targets)} 个缓存目录。")
+        print(f"[OK] 已清除 {len(targets)} 个缓存目录。")
         return 0
 
     if action == "gc":
@@ -373,7 +486,7 @@ def _cmd_cache(args: argparse.Namespace) -> int:
             if f.stat().st_mtime < cutoff:
                 f.unlink()
                 removed += 1
-        print(f"✓ GC 完成：删除 {removed} 个超过 {max_age_days} 天的 Parquet 文件。")
+        print(f"[OK] GC 完成：删除 {removed} 个超过 {max_age_days} 天的 Parquet 文件。")
         return 0
 
     _err(f"未知 cache action: {action!r}")
@@ -413,6 +526,33 @@ def _add_common_backtest_args(p: argparse.ArgumentParser) -> None:
                    help="预测期（交易日，默认: 21）")
     p.add_argument("--n-groups", type=int, default=None, metavar="N",
                    dest="n_groups", help="分层数（默认: 5）")
+    # ── 股票池参数 ────────────────────────────────────────────────────────────
+    p.add_argument("--universe", default=None, metavar="NAME",
+                   help="静态股票池别名或 CSV 路径（hs300 / my_pool.csv）")
+    p.add_argument("--universe-mode", default=None,
+                   dest="universe_mode",
+                   choices=["all", "static_file", "topn_mktcap_dynamic"],
+                   help="股票池模式（默认: all）")
+    p.add_argument("--universe-top-n", type=int, default=None,
+                   dest="universe_top_n", metavar="N",
+                   help="动态池入选数量（默认: 500；仅 topn_mktcap_dynamic 生效）")
+    p.add_argument("--universe-metric", default=None,
+                   dest="universe_metric",
+                   choices=["total_mktcap", "free_float_mktcap"],
+                   help="市值指标（默认: total_mktcap）")
+    p.add_argument("--universe-rebalance-freq", default=None,
+                   dest="universe_rebalance_freq",
+                   choices=["annual", "semiannual", "quarterly"],
+                   help="动态池调仓频率（默认: semiannual）")
+    p.add_argument("--universe-effective-lag-days", type=int, default=None,
+                   dest="universe_effective_lag_days", metavar="N",
+                   help="决策日到生效日的滞后交易日数（默认: 1）")
+    p.add_argument("--force-exit-on-universe-drop",
+                   dest="force_exit_on_universe_drop",
+                   type=lambda x: x.lower() in ("1", "true", "yes"),
+                   default=None, metavar="BOOL",
+                   help="掉池持仓是否强制换仓（true/false，默认: true）")
+    # ─────────────────────────────────────────────────────────────────────────
     p.add_argument("--config",   default=None, metavar="PATH",
                    help="用户 YAML 配置文件（叠加在 default.yaml 之上）")
     p.add_argument("--show-config", action="store_true",
@@ -440,9 +580,20 @@ def build_parser() -> argparse.ArgumentParser:
             "  mf single --factor momentum_12_1\n"
             "  mf single --factor vwap_deviation --start 20210101\n"
             "  mf batch  --output artifacts/batch_results\n"
+            "  mf batch  --universe hs300\n"
+            "  mf batch  --universe-mode topn_mktcap_dynamic --universe-top-n 300\n"
             "  mf validate --suite lookahead\n"
             "  mf cache  info\n"
             "  mf cache  gc --days 14\n"
+            "\n"
+            "股票池\n"
+            "------\n"
+            "  --universe hs300                  静态：沪深300成分股（300只）\n"
+            "  --universe my_pool.csv            静态：自定义CSV（含 code 列）\n"
+            "  --universe-mode topn_mktcap_dynamic  动态：市值前N（默认500，防未来函数）\n"
+            "  --universe-top-n 300              动态池入选数量\n"
+            "  --universe-metric free_float_mktcap  使用流通市值排序\n"
+            "  （不指定 = 全部股票，约5800只）\n"
             "\n"
             "完整契约文档: docs/cli-contract.md\n"
         ),
@@ -467,11 +618,18 @@ def build_parser() -> argparse.ArgumentParser:
             "  mf single --factor momentum_12_1\n"
             "  mf single --factor vwap_deviation price_strength --start 20210101\n"
             "  mf single --factor value_pb --forward 10 --no-cache\n"
+            "  mf single --factor value_pb --universe hs300\n"
+            "  mf single --factor value_pb --ic-decay-diagnostics\n"
         ),
     )
     p_single.add_argument(
         "--factor", nargs="+", metavar="NAME",
         help="因子名称（可多个，用空格分隔）【必填】"
+    )
+    p_single.add_argument(
+        "--ic-decay-diagnostics", action="store_true",
+        dest="ic_decay_diagnostics",
+        help="回测后自动运行 IC 衰减异常诊断（6 模块），结果保存至 output/<factor>/ic_decay_diagnostics/",
     )
     _add_common_backtest_args(p_single)
     _add_common_io_args(p_single)
@@ -490,7 +648,9 @@ def build_parser() -> argparse.ArgumentParser:
             "示例\n----\n"
             "  mf batch\n"
             "  mf batch --factors momentum_12_1 value_pb\n"
-            "  mf batch --start 20210101 --parallel 4\n"
+            "  mf batch --universe hs300\n"
+            "  mf batch --universe hs300 --start 20210101 --parallel 4\n"
+            "  mf batch --universe my_pool.csv\n"
         ),
     )
     p_batch.add_argument(
