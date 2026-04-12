@@ -168,15 +168,15 @@ class LayerBacktester:
         self._check_ran()
         s = self.summary()
         header = f"── Layer Backtest Summary {'[' + factor_name + ']' if factor_name else ''} ──"
-        print(header)
-        print(f"  LS Annual Return : {s.get('ls_annual_return', float('nan')):.2%}")
-        print(f"  LS Sharpe        : {s.get('ls_sharpe', float('nan')):.4f}")
-        print(f"  Max Drawdown     : {s.get('ls_max_drawdown', float('nan')):.2%}")
-        print(f"  Calmar Ratio     : {s.get('ls_calmar', float('nan')):.4f}")
-        print(f"  Win Rate         : {s.get('ls_win_rate', float('nan')):.2%}")
-        print(f"  Monotone Score   : {s.get('monotone_score', float('nan')):.4f}")
-        print(f"  Avg Turnover     : {s.get('avg_turnover', float('nan')):.2%}")
-        print(f"  Avg Trading Cost : {s.get('avg_cost', float('nan')):.4f}")
+        print(f"[INFO] {header}")
+        print(f"[INFO] LS Annual Return : {s.get('ls_annual_return', float('nan')):.2%}")
+        print(f"[INFO] LS Sharpe        : {s.get('ls_sharpe', float('nan')):.4f}")
+        print(f"[INFO] Max Drawdown     : {s.get('ls_max_drawdown', float('nan')):.2%}")
+        print(f"[INFO] Calmar Ratio     : {s.get('ls_calmar', float('nan')):.4f}")
+        print(f"[INFO] Win Rate         : {s.get('ls_win_rate', float('nan')):.2%}")
+        print(f"[INFO] Monotone Score   : {s.get('monotone_score', float('nan')):.4f}")
+        print(f"[INFO] Avg Turnover     : {s.get('avg_turnover', float('nan')):.2%}")
+        print(f"[INFO] Avg Trading Cost : {s.get('avg_cost', float('nan')):.4f}")
 
     def __repr__(self) -> str:
         status = "ran" if self._ran else "not-ran (call .run())"

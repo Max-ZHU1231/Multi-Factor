@@ -242,9 +242,9 @@ def _save_diag_report(report: object, out_dir: Path) -> None:
                 elif isinstance(ev, pd.Series):
                     ev.to_frame().to_csv(out_dir / filename)
             except Exception as _exc:
-                warnings.warn(f"[diagnostics] Failed to save {filename}: {_exc}")
+                warnings.warn(f"[WARN] [diagnostics] Failed to save {filename}: {_exc}")
 
-    print(f"[OK] IC decay diagnostics report saved to {out_dir}/")
+    print(f"[INFO] IC decay diagnostics report saved to {out_dir}/")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -321,7 +321,7 @@ class FactorReport:
         """
         if self.price_panel is None:
             raise ValueError(
-                "run_ic_diagnostics() requires price_panel.\n"
+                "[ERROR] run_ic_diagnostics() requires price_panel.\n"
                 "Use pipe.run(..., run_ic_decay_diagnostics=True) or set "
                 "report.price_panel = price_df before calling this method."
             )
@@ -353,36 +353,36 @@ class FactorReport:
         """终端打印因子评估报告。"""
         sep = "=" * 64
         print(f"\n{sep}")
-        print(f"  Factor Name: {self.factor_name}")
+        print(f"[INFO] Factor Name: {self.factor_name}")
         print(sep)
 
         # ── 合成权重（多因子时显示）────────────────────────────────────────
         if self.composite_weights:
-            print(f"\n[Composite Factor Weights]")
+            print(f"\n[INFO] [Composite Factor Weights]")
             for name, w in sorted(self.composite_weights.items(), key=lambda x: -x[1]):
                 bar = "█" * max(0, int(w * 40))
-                print(f"  {name:<28} {w:>6.2%}  {bar}")
-            print(f"  {'Total':<28} {sum(self.composite_weights.values()):>6.2%}")
+                print(f"[INFO] {name:<28} {w:>6.2%}  {bar}")
+            print(f"[INFO] {'Total':<28} {sum(self.composite_weights.values()):>6.2%}")
 
         s = self.ic_stats_
-        print(f"\n[IC Analysis]")
-        print(f"  Mean IC      : {s.get('mean_ic', 'N/A'):.4f}  "
+        print(f"\n[INFO] [IC Analysis]")
+        print(f"[INFO] Mean IC      : {s.get('mean_ic', 'N/A'):.4f}  "
               f"(pass |IC| > 0.02, strong > 0.05)")
-        print(f"  Std  IC      : {s.get('std_ic', 'N/A'):.4f}")
-        print(f"  ICIR         : {s.get('icir', 'N/A'):.4f}  "
+        print(f"[INFO] Std  IC      : {s.get('std_ic', 'N/A'):.4f}")
+        print(f"[INFO] ICIR         : {s.get('icir', 'N/A'):.4f}  "
               f"(pass > 0.5, strong > 1.0)")
-        print(f"  IC Win Rate  : {s.get('win_rate', 'N/A'):.1%}  "
+        print(f"[INFO] IC Win Rate  : {s.get('win_rate', 'N/A'):.1%}  "
               f"(pass > 55%)")
-        print(f"  t-stat       : {s.get('t_stat', 'N/A'):.4f}  "
+        print(f"[INFO] t-stat       : {s.get('t_stat', 'N/A'):.4f}  "
               f"(|t| > 2 is significant)")
-        print(f"  Newey-West t : {self.ic_nw.get('nw_t_stat', 'N/A')}")
-        print(f"  Valid Periods: {s.get('total_periods', 'N/A')}")
+        print(f"[INFO] Newey-West t : {self.ic_nw.get('nw_t_stat', 'N/A')}")
+        print(f"[INFO] Valid Periods: {s.get('total_periods', 'N/A')}")
 
-        print(f"\n[IC Decay (Mean IC by horizon)]")
+        print(f"\n[INFO] [IC Decay (Mean IC by horizon)]")
         print(self.ic_decay_df[["mean_ic", "icir"]].to_string())
 
         ls = self.ls_stats
-        print(f"\n[Layer Backtest · Long-Short]")
+        print(f"\n[INFO] [Layer Backtest · Long-Short]")
         print(f"  Annual Return: {ls.get('ls_annual_return', 'N/A'):.2%}  "
               f"(pass > 10%)")
         print(f"  Annual Sharpe: {ls.get('ls_sharpe', 'N/A'):.4f}  "
@@ -396,7 +396,7 @@ class FactorReport:
         print(f"  Monotone Score: {ls.get('monotone_score', 'N/A'):.4f}  "
               f"(closer to 1 is better)")
 
-        print(f"\n[Annualized Return by Layer]")
+        print(f"\n[INFO] [Annualized Return by Layer]")
         ann = ls.get("layer_annual_return")
         if ann is not None:
             for k, v in ann.items():
@@ -407,7 +407,7 @@ class FactorReport:
                     print(f"  {k}: {v:>8.2%}  {bar}")
 
         t = self.turnover
-        print(f"\n[Turnover and Trading Cost]")
+        print(f"\n[INFO] [Turnover and Trading Cost]")
         print(f"  Avg One-way Turnover: {t.get('avg_turnover', 'N/A'):.2%}")
         print(f"  Estimated Cost/Period: {t.get('avg_cost', 'N/A'):.4%}")
 
@@ -477,7 +477,7 @@ class FactorReport:
                    "avg_cost":         self.turnover.get("avg_cost"),
                    }
         pd.DataFrame([summary]).to_csv(out / "summary.csv", index=False)
-        print(f"[OK] Report saved to {out}/")
+        print(f"[INFO] Report saved to {out}/")
 
         # ── 若诊断报告已运行，自动保存到 ic_decay_diagnostics/ 子目录 ───────
         if self._diag_report is not None:
@@ -595,7 +595,7 @@ class FactorPipeline:
             if n in BUILTIN_FACTORS:
                 self.engine.register(n, BUILTIN_FACTORS[n])
             else:
-                warnings.warn(f"Built-in factor '{n}' not found; skipped.")
+                warnings.warn(f"[WARN] Built-in factor '{n}' not found; skipped.")
         return self
 
     # ── 核心运行 ──────────────────────────────────────────────────────────────
@@ -665,7 +665,7 @@ class FactorPipeline:
         if config is None:
             if not factor_name:
                 raise ValueError(
-                    "run() requires factor_name or config=ResearchConfig(...)."
+                    "[ERROR] run() requires factor_name or config=ResearchConfig(...)."
                 )
             config = ResearchConfig.from_kwargs(
                 factor_name      = factor_name,
@@ -719,16 +719,16 @@ class FactorPipeline:
         if self._cache is not None:
             self._cache.reset_stats()
 
-        print(f"\n[1/6] Building factor panel: {factor_name} ...")
+        print(f"\n[INFO] [1/6] Building factor panel: {factor_name} ...")
         factor_panel = self._builder.build_panel(
             factor_name, start=start, end=end, symbols=symbols
         )
         if factor_panel.empty:
-            raise ValueError(f"Factor panel '{factor_name}' is empty; check factor function or source data.")
+            raise ValueError(f"[ERROR] Factor panel '{factor_name}' is empty; check factor function or source data.")
 
-        print(f"      Factor panel: {factor_panel.shape[0]} trading days x {factor_panel.shape[1]} symbols")
+        print(f"[INFO] Factor panel: {factor_panel.shape[0]} trading days x {factor_panel.shape[1]} symbols")
 
-        print(f"\n[2/6] Building return panel (forward={forward}, T+1 already applied) ...")
+        print(f"\n[INFO] [2/6] Building return panel (forward={forward}, T+1 already applied) ...")
         return_panel = self._builder.build_return_panel(
             forward=forward, start=start, end=end, symbols=symbols
         )
@@ -739,7 +739,7 @@ class FactorPipeline:
         n_dropped = len(return_panel) - len(valid_ret_idx)
         if n_dropped > 0:
             warnings.warn(
-                f"[tail-trim] return_panel tail has {n_dropped} all-NaN trading days "
+                f"[WARN] [tail-trim] return_panel tail has {n_dropped} all-NaN trading days "
                 f"(including T+1 lag); aligned rows were trimmed from factor_panel."
             )
             return_panel = return_panel.loc[valid_ret_idx]
@@ -751,7 +751,7 @@ class FactorPipeline:
         # BUG 10 NOTE: T+1 已内置于 build_return_panel（price.shift(-fwd)/price-1 再
         # .shift(1)），即 return_panel[t] = t+1 日起持有的远期收益。故 factor_panel[t]
         # （t 日收盘计算）与 return_panel[t] 对齐是正确的，无需额外移位。
-        print(f"\n[3/6] Cross-sectional preprocessing (winsorize={winsorize}, standardize={standardize}, neutralize={neutralize}) ...")
+        print(f"\n[INFO] [3/6] Cross-sectional preprocessing (winsorize={winsorize}, standardize={standardize}, neutralize={neutralize}) ...")
 
         if winsorize:
             factor_panel = self.engine.apply_cross_section(factor_panel, cs_winsorize)
@@ -769,7 +769,7 @@ class FactorPipeline:
                 industry_map = self.engine.industry_map,
             )
         elif neutralize:
-            warnings.warn("neutralize=True but industry_map is empty; neutralization skipped.")
+            warnings.warn("[WARN] neutralize=True but industry_map is empty; neutralization skipped.")
 
         if standardize == "rank":
             factor_panel = self.engine.apply_cross_section(factor_panel, cs_rank)
@@ -782,7 +782,7 @@ class FactorPipeline:
         # BUG 9 FIX: 为每个 ic_forward_list 中的 forward 构建收益率面板，
         # 传入 ic_decay 的 return_panels 参数，消除双路径不一致问题。
         # 注意：此处在日频面板上构建多个 forward 的收益率，与主 IC 路径同源。
-        print(f"\n[4/6] IC analysis (method={ic_method}) ...")
+        print(f"\n[INFO] [4/6] IC analysis (method={ic_method}) ...")
         ic_return_panels: Dict[int, pd.DataFrame] = {}
         for _fwd in ic_forward_list:
             _rp = self._builder.build_return_panel(
@@ -811,7 +811,7 @@ class FactorPipeline:
                 )
                 del self.engine._registry["__close_diag__"]
             except Exception as _pe:
-                warnings.warn(f"[diagnostics] Failed to fetch price_panel: {_pe}")
+                warnings.warn(f"[WARN] [diagnostics] Failed to fetch price_panel: {_pe}")
             try:
                 self.engine.register("__mktcap_diag__", lambda df: df["总市值（万元）"])
                 _diag_mktcap_panel = self._builder.build_panel(
@@ -829,7 +829,7 @@ class FactorPipeline:
         # layer_backtest 和 turnover_analysis 中每行对应一个月，不存在日频滚动重叠。
         if resample_monthly:
             factor_panel, return_panel = _resample_monthly(factor_panel, return_panel)
-            print(f"      [monthly-resample] {factor_panel.shape[0]} month-end snapshots")
+            print(f"[INFO] [monthly-resample] {factor_panel.shape[0]} month-end snapshots")
 
         # ── IC 分析（月度重采样后执行，与 return_panel 频率一致）────────────
         ic_series = compute_ic(factor_panel, return_panel, method=ic_method)
@@ -839,7 +839,7 @@ class FactorPipeline:
         # ── 分层回测 ──────────────────────────────────────────────────────────
         # BUG 14 NOTE: periods_per_year 由调用方指定（月度重采样后应传 12），
         # _annual_return 使用 total^(periods_per_year/n)-1，月频输入时正确年化。
-        print(f"\n[5/6] Layer backtest (n_groups={n_groups}) ...")
+        print(f"\n[INFO] [5/6] Layer backtest (n_groups={n_groups}) ...")
         layer_ret = layer_backtest(
             factor_panel, return_panel,
             n_groups=n_groups, direction=direction
@@ -847,7 +847,7 @@ class FactorPipeline:
         ls_stats_ = long_short_stats(layer_ret, periods_per_year=periods_per_year, rf=rf)
 
         # ── 换手率分析 ────────────────────────────────────────────────────────
-        print(f"\n[6/6] Turnover analysis ...")
+        print(f"\n[INFO] [6/6] Turnover analysis ...")
         turnover_ = turnover_analysis(
             factor_panel, n_groups=n_groups, direction=direction,
             cost_per_side=cost_per_side
@@ -871,7 +871,7 @@ class FactorPipeline:
 
         # ── IC 衰减诊断（可选）──────────────────────────────────────────────
         if run_ic_decay_diagnostics and _diag_price_panel is not None:
-            print(f"\n[+] IC decay diagnostics (6 modules) ...")
+            print(f"\n[INFO] [+] IC decay diagnostics (6 modules) ...")
             try:
                 _factor_panel_monthly = report.factor_panel
                 # 诊断模块使用日频原始因子面板（resample 前），不含 T+1
@@ -885,10 +885,10 @@ class FactorPipeline:
                 report.factor_panel = _factor_panel_monthly
                 # save() 时自动保存到 ic_decay_diagnostics/ 子目录
             except Exception as _de:
-                warnings.warn(f"[diagnostics] IC decay diagnostics failed (non-fatal): {_de}")
+                warnings.warn(f"[WARN] [diagnostics] IC decay diagnostics failed (non-fatal): {_de}")
 
         if run_advanced_diagnostics:
-            print(f"\n[+] Advanced Diagnostics Pack ...")
+            print(f"\n[INFO] [+] Advanced Diagnostics Pack ...")
             try:
                 # ── Auto-build peer factor panels (user-provided panels keep priority) ──
                 explicit_peers = getattr(report, "peer_factor_panels", None)
@@ -972,7 +972,7 @@ class FactorPipeline:
                     enable_wide_output=advanced_enable_wide_output,
                 )
             except Exception as _ade:
-                warnings.warn(f"[advanced_diagnostics] Failed (non-fatal): {_ade}")
+                warnings.warn(f"[WARN] [advanced_diagnostics] Failed (non-fatal): {_ade}")
 
         # ── Phase D: 生成 RunManifest ─────────────────────────────────────
         try:
@@ -988,9 +988,9 @@ class FactorPipeline:
                 git_sha    = (_ci.get("git_sha") if _ci else None),
             )
         except Exception as _mex:
-            warnings.warn(f"[manifest] Generation failed (non-fatal): {_mex}")
+            warnings.warn(f"[WARN] [manifest] Generation failed (non-fatal): {_mex}")
 
-        print("\n[OK] Pipeline completed.")
+        print("\n[INFO] Pipeline completed.")
         return report
 
     # ── 批量多因子运行（面板预构建版）──────────────────────────────────────────
@@ -1060,10 +1060,10 @@ class FactorPipeline:
         total = len(factor_panels)
 
         for i, (factor_name, raw_panel) in enumerate(factor_panels.items(), 1):
-            print(f"\n[{i:02d}/{total}] Evaluating factor: {factor_name} ...")
+            print(f"\n[INFO] [{i:02d}/{total}] Evaluating factor: {factor_name} ...")
             try:
                 if raw_panel.empty:
-                    raise ValueError("factor panel is empty")
+                    raise ValueError("[ERROR] factor panel is empty")
 
                 # 对齐尾部截断（用 loc+intersection 避免 reindex 引入幽灵 NaN 行）
                 common_idx   = raw_panel.index.intersection(valid_ret_idx)
@@ -1086,7 +1086,7 @@ class FactorPipeline:
                         industry_map=self.engine.industry_map,
                     )
                 elif neutralize:
-                    warnings.warn("neutralize=True but industry_map is empty; neutralization skipped.")
+                    warnings.warn("[WARN] neutralize=True but industry_map is empty; neutralization skipped.")
 
                 if standardize == "rank":
                     factor_panel = self.engine.apply_cross_section(factor_panel, cs_rank)
@@ -1142,7 +1142,7 @@ class FactorPipeline:
                     return_panel = ret_panel,
                 )
             except Exception as exc:
-                warnings.warn(f"Factor '{factor_name}' evaluation failed: {exc}")
+                warnings.warn(f"[WARN] Factor '{factor_name}' evaluation failed: {exc}")
 
         return reports
 
@@ -1163,7 +1163,7 @@ class FactorPipeline:
                 report = self.run(name, **kwargs)
                 rows.append(report.summary_dict)
             except Exception as e:
-                warnings.warn(f"Factor '{name}' evaluation failed: {e}")
+                warnings.warn(f"[WARN] Factor '{name}' evaluation failed: {e}")
                 rows.append({"factor": name})
         return pd.DataFrame(rows).set_index("factor")
 
@@ -1210,27 +1210,27 @@ class FactorPipeline:
                       report.composite_weights 存储各因子权重。
         """
         if not factor_names:
-            raise ValueError("factor_names cannot be empty.")
+            raise ValueError("[ERROR] factor_names cannot be empty.")
 
         method = method.lower().strip()
         if method not in ("equal", "icir"):
-            raise ValueError(f"Unsupported composition method '{method}'. Choose 'equal' or 'icir'.")
+            raise ValueError(f"[ERROR] Unsupported composition method '{method}'. Choose 'equal' or 'icir'.")
 
         # ── Step 1：逐因子构建面板 ───────────────────────────────────────────
         print(f"\n{'='*60}")
-        print(f"  Multi-factor composition  [{composite_name}]  method={method}")
+        print(f"[INFO] Multi-factor composition  [{composite_name}]  method={method}")
         print(f"{'='*60}")
 
         factor_panels:  Dict[str, pd.DataFrame] = {}
         ic_series_dict: Dict[str, pd.Series]    = {}
 
         for i, name in enumerate(factor_names, 1):
-            print(f"\n[Factor {i}/{len(factor_names)}] Building panel: {name} ...")
+            print(f"\n[INFO] [Factor {i}/{len(factor_names)}] Building panel: {name} ...")
             raw_panel = self._builder.build_panel(
                 name, start=start, end=end, symbols=symbols
             )
             if raw_panel.empty:
-                warnings.warn(f"Factor '{name}' panel is empty; skipped.")
+                warnings.warn(f"[WARN] Factor '{name}' panel is empty; skipped.")
                 continue
 
             # 截面预处理（每个因子独立处理）
@@ -1255,10 +1255,10 @@ class FactorPipeline:
             factor_panels[name] = panel
 
         if not factor_panels:
-            raise ValueError("All factor panels are empty; cannot compose.")
+            raise ValueError("[ERROR] All factor panels are empty; cannot compose.")
 
         # ── Step 2：构建收益率面板（公共一份）──────────────────────────────
-        print(f"\nBuilding return panel (forward={forward}) ...")
+        print(f"\n[INFO] Building return panel (forward={forward}) ...")
         return_panel = self._builder.build_return_panel(
             forward=forward, start=start, end=end, symbols=symbols
         )
@@ -1268,7 +1268,7 @@ class FactorPipeline:
         n_dropped = len(return_panel) - len(valid_ret_idx)
         if n_dropped > 0:
             warnings.warn(
-                f"[tail-trim] return_panel tail has {n_dropped} all-NaN trading days "
+                f"[WARN] [tail-trim] return_panel tail has {n_dropped} all-NaN trading days "
                 f"due to forward={forward} shift; aligned rows were trimmed from all factor panels."
             )
             return_panel  = return_panel.loc[valid_ret_idx]
@@ -1279,12 +1279,12 @@ class FactorPipeline:
 
         # ── Step 3：逐因子计算 IC（ICIR 加权需要）──────────────────────────
         if method == "icir":
-            print(f"\nComputing IC per factor (ICIR rolling window={icir_window}) ...")
+            print(f"\n[INFO] Computing IC per factor (ICIR rolling window={icir_window}) ...")
             for name, panel in factor_panels.items():
                 ic_series_dict[name] = compute_ic(panel, return_panel, method=ic_method)
 
         # ── Step 4：合成因子 ─────────────────────────────────────────────────
-        print(f"\nComposing factor (method={method}) ...")
+        print(f"\n[INFO] Composing factor (method={method}) ...")
         if method == "equal":
             composite_panel, weights = equal_weight(factor_panels)
         else:  # icir
@@ -1309,7 +1309,7 @@ class FactorPipeline:
         print_weights(weights, method={"equal": "Equal Weight", "icir": "ICIR Weight"}[method], icir_dict=icir_vals)
 
         # ── Step 5：合成因子的 IC 分析 ────────────────────────────────────
-        print(f"Computing composite factor IC ...")
+        print(f"[INFO] Computing composite factor IC ...")
         ic_series = compute_ic(composite_panel, return_panel, method=ic_method)
         ic_s      = ic_stats(ic_series, annualize_periods=periods_per_year)
         ic_nw     = ic_significance(ic_series, lags=max(1, int(len(ic_series) ** 0.25)))
@@ -1329,7 +1329,7 @@ class FactorPipeline:
         )
 
         # ── Step 6：分层回测 ──────────────────────────────────────────────
-        print(f"Layer backtest (n_groups={n_groups}) ...")
+        print(f"[INFO] Layer backtest (n_groups={n_groups}) ...")
         layer_ret = layer_backtest(
             composite_panel, return_panel,
             n_groups=n_groups, direction=direction
@@ -1337,7 +1337,7 @@ class FactorPipeline:
         ls_stats_ = long_short_stats(layer_ret, periods_per_year=periods_per_year, rf=rf)
 
         # ── Step 7：换手率 ────────────────────────────────────────────────
-        print(f"Turnover analysis ...")
+        print(f"[INFO] Turnover analysis ...")
         turnover_ = turnover_analysis(
             composite_panel, n_groups=n_groups, direction=direction,
             cost_per_side=cost_per_side
@@ -1357,5 +1357,5 @@ class FactorPipeline:
             composite_weights  = weights,
         )
 
-        print("\n[OK] Multi-factor composition completed.")
+        print("\n[INFO] Multi-factor composition completed.")
         return report

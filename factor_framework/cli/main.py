@@ -130,14 +130,14 @@ def _print_header(title: str, cfg) -> None:
     else:
         uni_display = uni_mode
     print("\n" + "=" * 64)
-    print(f"  {title}")
+    print(f"[INFO] {title}")
     print("=" * 64)
-    print(f"  Data Dir     : {cfg.data.stocks_dir}")
-    print(f"  Universe     : {uni_display}")
-    print(f"  Date Range   : {cfg.backtest.start} ~ {cfg.backtest.end}")
-    print(f"  Forward Days : {cfg.backtest.forward}")
-    print(f"  N Groups     : {cfg.backtest.n_groups}")
-    print(f"  Cache Dir    : {cfg.cache.cache_dir}")
+    print(f"[INFO] Data Dir     : {cfg.data.stocks_dir}")
+    print(f"[INFO] Universe     : {uni_display}")
+    print(f"[INFO] Date Range   : {cfg.backtest.start} ~ {cfg.backtest.end}")
+    print(f"[INFO] Forward Days : {cfg.backtest.forward}")
+    print(f"[INFO] N Groups     : {cfg.backtest.n_groups}")
+    print(f"[INFO] Cache Dir    : {cfg.cache.cache_dir}")
     print("=" * 64 + "\n")
 
 
@@ -169,7 +169,7 @@ def _resolve_universe(cfg, root: Path = _ROOT):
 
     except Exception as exc:
         import warnings as _w
-        _w.warn(f"[universe] Failed to load universe; fallback to full universe: {exc}")
+        _w.warn(f"[WARN] [universe] Failed to load universe; fallback to full universe: {exc}")
         return None
 
 
@@ -197,10 +197,10 @@ def _save_manifest(pipe, cfg, factors, failures, start_time: float,
         out_path = out_dir / "run_manifest.json"
         mf.save(out_path)
         mf.print_summary()
-        print(f"  manifest → {out_path}")
+        print(f"[INFO] manifest -> {out_path}")
     except Exception as exc:
         import warnings as _w
-        _w.warn(f"[manifest] Save failed (non-fatal): {exc}")
+        _w.warn(f"[WARN] [manifest] Save failed (non-fatal): {exc}")
 
 def _cmd_single(args: argparse.Namespace) -> int:
     """Single-factor IC + layer-backtest screening."""
@@ -247,7 +247,7 @@ def _cmd_single(args: argparse.Namespace) -> int:
             symbols = None
             uni_display = "all symbols"
         if not getattr(args, "quiet", False):
-            print(f"  Universe     : {uni_display}")
+            print(f"[INFO] Universe     : {uni_display}")
 
         out_base = Path(
             getattr(args, "output", None) or cfg.output.factor_analysis
@@ -260,7 +260,7 @@ def _cmd_single(args: argparse.Namespace) -> int:
             factor_out.mkdir(parents=True, exist_ok=True)
             try:
                 if not getattr(args, "quiet", False):
-                    print(f"\n{'─'*56}\n  Factor: {factor_name}\n{'─'*56}")
+                    print(f"\n{'─'*56}\n[INFO] Factor: {factor_name}\n{'─'*56}")
                 from factor_framework.research_config import ResearchConfig
                 rc = ResearchConfig.from_kwargs(
                     factor_name      = factor_name,
@@ -371,7 +371,7 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             symbols = None
             uni_display = "all symbols"
         if not getattr(args, "quiet", False):
-            print(f"  Universe     : {uni_display}")
+            print(f"[INFO] Universe     : {uni_display}")
 
         factor_list = getattr(args, "factors", None) or list(BUILTIN_FACTORS.keys())
         out_dir = Path(getattr(args, "output", None) or cfg.output.batch)
@@ -381,7 +381,7 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         failures = []
         for name in factor_list:
             if not getattr(args, "quiet", False):
-                print(f"\n{'='*60}\nFactor: {name}\n{'='*60}")
+                print(f"\n{'='*60}\n[INFO] Factor: {name}\n{'='*60}")
             try:
                 from factor_framework.research_config import ResearchConfig
                 rc = ResearchConfig.from_kwargs(
@@ -433,10 +433,10 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             df = pd.DataFrame(summaries).set_index("factor")
             csv_path = out_dir / "factor_screening_summary.csv"
             df.to_csv(csv_path)
-            print(f"\n[OK] IC summary saved: {csv_path}")
+            print(f"\n[INFO] IC summary saved: {csv_path}")
 
         n_ok = len(summaries) - len(failures)
-        print(f"\nDone: {n_ok}/{len(summaries)} factors succeeded, {len(failures)} skipped.")
+        print(f"\n[INFO] Done: {n_ok}/{len(summaries)} factors succeeded, {len(failures)} skipped.")
 
         # ── Phase D: 写入 run_manifest.json ──────────────────────────────
         _save_manifest(
@@ -473,8 +473,8 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     test_paths = suite_map.get(suite, suite_map["all"])
 
     cmd = [sys.executable, "-m", "pytest", "--tb=short"] + verbose_flag + test_paths
-    print(f"[mf validate] Running suite: {suite}")
-    print(f"  Command: {' '.join(cmd)}\n")
+    print(f"[INFO] [mf validate] Running suite: {suite}")
+    print(f"[INFO] Command: {' '.join(cmd)}\n")
 
     result = subprocess.run(cmd, cwd=str(_ROOT))
     return 0 if result.returncode == 0 else 1
@@ -491,7 +491,7 @@ def _cmd_cache(args: argparse.Namespace) -> int:
     factor_filter = getattr(args, "factor", None)
 
     if not cache_dir.exists():
-        print(f"Cache directory does not exist: {cache_dir}")
+        print(f"[WARN] Cache directory does not exist: {cache_dir}")
         return 0
 
     if action == "info":
@@ -499,10 +499,10 @@ def _cmd_cache(args: argparse.Namespace) -> int:
         if factor_filter:
             entries = [e for e in entries if factor_filter in str(e)]
         total_mb = sum(e.stat().st_size for e in entries) / 1024 / 1024
-        print(f"Cache directory : {cache_dir}")
-        print(f"Factor subdirs  : {len(list(cache_dir.iterdir()))}")
-        print(f"Parquet files   : {len(entries)}")
-        print(f"Total size      : {total_mb:.1f} MB")
+        print(f"[INFO] Cache directory : {cache_dir}")
+        print(f"[INFO] Factor subdirs  : {len(list(cache_dir.iterdir()))}")
+        print(f"[INFO] Parquet files   : {len(entries)}")
+        print(f"[INFO] Total size      : {total_mb:.1f} MB")
         return 0
 
     if action == "clear":
@@ -514,8 +514,8 @@ def _cmd_cache(args: argparse.Namespace) -> int:
             targets = [d for d in cache_dir.iterdir() if d.is_dir()]
         for t in targets:
             shutil.rmtree(t)
-            print(f"  Deleted: {t.name}")
-        print(f"[OK] Cleared {len(targets)} cache directories.")
+            print(f"[INFO] Deleted: {t.name}")
+        print(f"[INFO] Cleared {len(targets)} cache directories.")
         return 0
 
     if action == "gc":
@@ -527,7 +527,7 @@ def _cmd_cache(args: argparse.Namespace) -> int:
             if f.stat().st_mtime < cutoff:
                 f.unlink()
                 removed += 1
-        print(f"[OK] GC complete: removed {removed} parquet files older than {max_age_days} days.")
+        print(f"[INFO] GC complete: removed {removed} parquet files older than {max_age_days} days.")
         return 0
 
     _err(f"Unknown cache action: {action!r}")
@@ -539,8 +539,8 @@ def _cmd_cache(args: argparse.Namespace) -> int:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _cmd_report(args: argparse.Namespace) -> int:
-    print("[mf report] Phase D - report generation will be implemented in v4.1.")
-    print("  For now, inspect CSV files under artifacts/.")
+    print("[INFO] [mf report] Phase D - report generation will be implemented in v4.1.")
+    print("[INFO] For now, inspect CSV files under artifacts/.")
     return 0
 
 
@@ -549,7 +549,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _cmd_composite(args: argparse.Namespace) -> int:
-    print("[mf composite] v4.1 - multi-factor composition will be implemented in v4.1.")
+    print("[INFO] [mf composite] v4.1 - multi-factor composition will be implemented in v4.1.")
     return 0
 
 

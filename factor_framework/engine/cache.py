@@ -311,7 +311,7 @@ class CacheLayer:
                     return panel
                 except Exception as e:
                     warnings.warn(
-                        f"[CacheLayer] Failed to read parquet ({parquet_path}): {e}. "
+                        f"[WARN] [CacheLayer] Failed to read parquet ({parquet_path}): {e}. "
                         "Cache entry ignored; trying legacy key or recomputing.",
                         stacklevel=2,
                     )
@@ -327,14 +327,14 @@ class CacheLayer:
                         self.last_hit_source = "legacy_key_hit"
                         self._stats["legacy_key_hit"] += 1
                         warnings.warn(
-                            f"[CacheLayer] Factor '{factor_name}' hit legacy cache key (v1). "
+                            f"[WARN] [CacheLayer] Factor '{factor_name}' hit legacy cache key (v1). "
                             "Consider deleting legacy cache files after next run to fully migrate to v2 keys.",
                             stacklevel=2,
                         )
                         return panel
                     except Exception as e:
                         warnings.warn(
-                            f"[CacheLayer] Failed to read legacy parquet ({legacy_path}): {e}. "
+                            f"[WARN] [CacheLayer] Failed to read legacy parquet ({legacy_path}): {e}. "
                             "Will recompute.",
                             stacklevel=2,
                         )
@@ -374,7 +374,7 @@ class CacheLayer:
                 panel.to_parquet(parquet_path)
             except Exception as e:
                 warnings.warn(
-                    f"[CacheLayer] Failed to write parquet ({parquet_path}): {e}. "
+                    f"[WARN] [CacheLayer] Failed to write parquet ({parquet_path}): {e}. "
                     "Result is kept in L1 memory cache only for this run.",
                     stacklevel=2,
                 )

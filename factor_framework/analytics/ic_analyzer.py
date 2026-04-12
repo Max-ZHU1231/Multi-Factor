@@ -191,15 +191,15 @@ class ICAnalyzer:
         self._check_ran()
         s = self.summary()
         header = f"── IC Analysis Summary {'[' + factor_name + ']' if factor_name else ''} ──"
-        print(header)
-        print(f"  Mean IC        : {s.get('mean_ic', float('nan')):.4f}")
-        print(f"  IC Std         : {s.get('std_ic', float('nan')):.4f}")
-        print(f"  ICIR           : {s.get('icir', float('nan')):.4f}")
-        print(f"  Annualized ICIR: {s.get('annualized_icir', float('nan')):.4f}")
-        print(f"  Win Rate       : {s.get('win_rate', float('nan')):.2%}")
-        print(f"  t-stat         : {s.get('t_stat', float('nan')):.4f}")
-        print(f"  Newey-West t   : {s.get('nw_t_stat', float('nan')):.4f}")
-        print(f"  Valid Periods  : {s.get('total_periods', 0)}")
+        print(f"[INFO] {header}")
+        print(f"[INFO] Mean IC        : {s.get('mean_ic', float('nan')):.4f}")
+        print(f"[INFO] IC Std         : {s.get('std_ic', float('nan')):.4f}")
+        print(f"[INFO] ICIR           : {s.get('icir', float('nan')):.4f}")
+        print(f"[INFO] Annualized ICIR: {s.get('annualized_icir', float('nan')):.4f}")
+        print(f"[INFO] Win Rate       : {s.get('win_rate', float('nan')):.2%}")
+        print(f"[INFO] t-stat         : {s.get('t_stat', float('nan')):.4f}")
+        print(f"[INFO] Newey-West t   : {s.get('nw_t_stat', float('nan')):.4f}")
+        print(f"[INFO] Valid Periods  : {s.get('total_periods', 0)}")
 
     def __repr__(self) -> str:
         status = "ran" if self._ran else "not-ran (call .run())"

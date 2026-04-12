@@ -273,7 +273,7 @@ class _ModuleProgress:
             )
         else:
             idx = self.module_ids.index(mid) + 1
-            print(f"  [M{mid}] {name} start", flush=True)
+            print(f"[INFO] [M{mid}] {name} start", flush=True)
 
     def end_module(self, mid: int, status: str) -> None:
         self._done += 1
@@ -296,7 +296,7 @@ class _ModuleProgress:
 
     def summary(self) -> None:
         total_ela = self._fmt_sec(time.monotonic() - self._t0)
-        print(f"\n  Diagnostics completed  total elapsed {total_ela}", flush=True)
+        print(f"\n[INFO] Diagnostics completed  total elapsed {total_ela}", flush=True)
 
 
 # ── 便捷工厂函数 ──────────────────────────────────────────────────────────────
@@ -661,7 +661,7 @@ class DiagnosticResult:
         print(f"\n{sep}")
         print(f"  Module {self.module_id}: {self.module_name}  {status}  {risk}")
         print(sep)
-        print(f"  Conclusion: {self.conclusion}")
+        print(f"[INFO] Conclusion: {self.conclusion}")
         if isinstance(self.evidence, pd.DataFrame):
             print(f"\n  Evidence:\n{self.evidence.to_string()}")
         elif isinstance(self.evidence, dict):
@@ -698,7 +698,7 @@ class DiagnosticReport:
     def print_full(self) -> None:
         sep = "=" * 64
         print(f"\n{sep}")
-        print(f"  IC Decay Diagnostics Report  Factor: {self.factor_name or '(unnamed)'}")
+        print(f"[INFO] IC Decay Diagnostics Report  Factor: {self.factor_name or '(unnamed)'}")
         print(sep)
         # 汇总表
         print(f"\n{'Module':<6} {'Name':<30} {'Status':<8} {'Risk':<10}")
@@ -736,9 +736,9 @@ class DiagnosticReport:
             verdict = "Partially plausible (low-risk modules passed; further analysis recommended)"
             risk = "MEDIUM"
 
-        print(f"  Final Verdict: [{risk}] {verdict}")
-        print(f"  Passed Modules: {sum(1 for r in self.results if r.passed is True)} / {len(self.results)}")
-        print(f"  Failed Modules: {[f'M{r.module_id}' for r in fails]}")
+        print(f"[INFO] Final Verdict: [{risk}] {verdict}")
+        print(f"[INFO] Passed Modules: {sum(1 for r in self.results if r.passed is True)} / {len(self.results)}")
+        print(f"[INFO] Failed Modules: {[f'M{r.module_id}' for r in fails]}")
         print("=" * 64)
 
     def to_dict(self) -> Dict:
@@ -1875,7 +1875,7 @@ class ICDecayDiagnostics:
                 r = module_fns[mid]()
                 status = r.status_str()
             except Exception as exc:
-                warnings.warn(f"Module {mid} failed: {exc}")
+                warnings.warn(f"[WARN] Module {mid} failed: {exc}")
                 r = DiagnosticResult(
                     module_id   = mid,
                     module_name = {1: "时间对齐", 2: "累计窗口", 3: "暴露剥离",

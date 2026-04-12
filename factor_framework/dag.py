@@ -183,7 +183,7 @@ class DataNode(Expr):
 
     def eval(self, df: pd.DataFrame) -> pd.Series:
         if self.col not in df.columns:
-            raise KeyError(f"DataNode '{self.name}': column '{self.col}' is missing in DataFrame.")
+            raise KeyError(f"[ERROR] DataNode '{self.name}': column '{self.col}' is missing in DataFrame.")
         return df[self.col].copy()
 
     def __repr__(self) -> str:
@@ -337,7 +337,7 @@ def op(op_name: str, *args, fn: Optional[Callable] = None) -> OpNode:
         inp = args[0] if args else None
         periods = int(args[1]) if len(args) > 1 else 1
         if not isinstance(inp, Expr):
-            raise TypeError("The first argument of pct_change must be an Expr node.")
+            raise TypeError("[ERROR] The first argument of pct_change must be an Expr node.")
         return PctChangeNode(inp, periods)  # type: ignore[return-value]
 
     # 分离 Expr 输入 vs 标量参数
@@ -373,7 +373,7 @@ def _lookup_op(name: str) -> Callable:
     except ImportError:
         pass
     raise AttributeError(
-        f"Operator '{name}' was not found in factor_framework.operators. "
+        f"[ERROR] Operator '{name}' was not found in factor_framework.operators. "
         "Provide a callable explicitly via fn=."
     )
 
@@ -452,7 +452,7 @@ def topological_sort(roots: List[Expr]) -> List[Expr]:
                 queue.append(child_h)
 
     if len(result) != len(all_nodes):
-        raise ValueError("Cycle detected in DAG. Check factor dependencies.")
+        raise ValueError("[ERROR] Cycle detected in DAG. Check factor dependencies.")
 
     return result
 
@@ -687,7 +687,7 @@ class DepGraph:
                     q.append(child)
 
         if len(order) != len(all_names):
-            raise ValueError("Cycle detected in factor dependency graph. Check deps declarations.")
+            raise ValueError("[ERROR] Cycle detected in factor dependency graph. Check deps declarations.")
 
         # 只返回最初请求的因子（按拓扑顺序）
         requested = set(names)

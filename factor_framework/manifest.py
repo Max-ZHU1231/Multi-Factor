@@ -140,7 +140,7 @@ class RunManifest:
     def __init__(self, data: Dict[str, Any]) -> None:
         missing = self.REQUIRED_FIELDS - set(data.keys())
         if missing:
-            raise ValueError(f"RunManifest missing required fields: {sorted(missing)}")
+            raise ValueError(f"[ERROR] RunManifest missing required fields: {sorted(missing)}")
         self._data = data
 
     # ── 工厂方法 ──────────────────────────────────────────────────────────────
@@ -305,19 +305,19 @@ class RunManifest:
         cs = d.get("cache_stats", {})
         stats = cs.get("stats", {})
         print("\n" + "─" * 56)
-        print(f"  run_id       : {d['run_id']}")
-        print(f"  timestamp    : {d['timestamp']}")
-        print(f"  git_sha      : {d['git_sha']}")
-        print(f"  config_hash  : {d['config_hash']}")
-        print(f"  snapshot_id  : {d['data_snapshot_id']}")
-        print(f"  factors      : {', '.join(d['factors'])}")
-        print(f"  date_range   : {d['date_range']['start']} ~ {d['date_range']['end']}")
-        print(f"  exit_status  : {d['exit_status']}")
+        print(f"[INFO] run_id       : {d['run_id']}")
+        print(f"[INFO] timestamp    : {d['timestamp']}")
+        print(f"[INFO] git_sha      : {d['git_sha']}")
+        print(f"[INFO] config_hash  : {d['config_hash']}")
+        print(f"[INFO] snapshot_id  : {d['data_snapshot_id']}")
+        print(f"[INFO] factors      : {', '.join(d['factors'])}")
+        print(f"[INFO] date_range   : {d['date_range']['start']} ~ {d['date_range']['end']}")
+        print(f"[INFO] exit_status  : {d['exit_status']}")
         if d["failures"]:
-            print(f"  failed_factors: {', '.join(d['failures'])}")
-        print(f"  duration     : {d['run_duration_secs']}s")
+            print(f"[WARN] failed_factors: {', '.join(d['failures'])}")
+        print(f"[INFO] duration     : {d['run_duration_secs']}s")
         if stats:
-            print(f"  cache_hit(v2): {stats.get('new_key_hit', 0)}")
-            print(f"  cache_hit(old): {stats.get('legacy_key_hit', 0)}")
-            print(f"  recompute    : {stats.get('recompute', 0)}")
+            print(f"[INFO] cache_hit(v2): {stats.get('new_key_hit', 0)}")
+            print(f"[INFO] cache_hit(old): {stats.get('legacy_key_hit', 0)}")
+            print(f"[INFO] recompute    : {stats.get('recompute', 0)}")
         print("─" * 56)

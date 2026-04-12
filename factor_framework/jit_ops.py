@@ -63,7 +63,7 @@ try:
 except ImportError:
     _NUMBA_OK = False
     warnings.warn(
-        "[jit_ops] numba is not installed; time-series operators will fall back to pandas.\n"
+        "[WARN] [jit_ops] numba is not installed; time-series operators will fall back to pandas.\n"
         "Install via: pip install numba",
         stacklevel=2,
     )
@@ -74,7 +74,7 @@ try:
 except ImportError:
     _NUMEXPR_OK = False
     warnings.warn(
-        "[jit_ops] numexpr is not installed; math operators will fall back to NumPy.\n"
+        "[WARN] [jit_ops] numexpr is not installed; math operators will fall back to NumPy.\n"
         "Install via: pip install numexpr",
         stacklevel=2,
     )
@@ -627,6 +627,6 @@ def warmup(verbose: bool = True) -> dict[str, float]:
         times[name] = elapsed
         if verbose:
             status = "(JIT)" if _NUMBA_OK else "(fallback)"
-            print(f"  [warmup] {name:<18s} {status}  {elapsed:.3f}s")
+            print(f"[INFO] [warmup] {name:<18s} {status}  {elapsed:.3f}s")
 
     return times

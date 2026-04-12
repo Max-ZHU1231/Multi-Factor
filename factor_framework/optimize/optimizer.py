@@ -139,7 +139,7 @@ def equal_weight(
     weights   : Dict[str, float]  各因子权重（等权为 1/N）
     """
     if not factor_panels:
-        raise ValueError("factor_panels cannot be empty.")
+        raise ValueError("[ERROR] factor_panels cannot be empty.")
 
     n = len(factor_panels)
     weights = {name: 1.0 / n for name in factor_panels}
@@ -184,7 +184,7 @@ def icir_weight(
     weights   : Dict[str, float]  各因子权重
     """
     if not factor_panels:
-        raise ValueError("factor_panels cannot be empty.")
+        raise ValueError("[ERROR] factor_panels cannot be empty.")
 
     names = list(factor_panels.keys())
 
@@ -216,7 +216,7 @@ def icir_weight(
     if missing_ic:
         import warnings
         warnings.warn(
-            f"The following factors are missing IC series; weights are set to 0: {missing_ic}\n"
+            f"[WARN] The following factors are missing IC series; weights are set to 0: {missing_ic}\n"
             "Ensure ic_series_dict contains corresponding keys."
         )
 
@@ -249,16 +249,16 @@ def print_weights(
     """
     sep = "─" * 52
     print(f"\n{'='*52}")
-    print(f"  Factor Combination Weights  [{method}]")
+    print(f"[INFO] Factor Combination Weights  [{method}]")
     print(f"{'='*52}")
-    print(f"  {'Factor':<24}  {'Weight':>7}  {'ICIR':>8}")
+    print(f"[INFO] {'Factor':<24}  {'Weight':>7}  {'ICIR':>8}")
     print(sep)
     for name, w in sorted(weights.items(), key=lambda x: -x[1]):
         icir_str = ""
         if icir_dict and name in icir_dict:
             icir_str = f"{icir_dict[name]:>8.4f}"
         bar = "█" * max(0, int(w * 40))
-        print(f"  {name:<24}  {w:>6.2%}  {icir_str}  {bar}")
+        print(f"[INFO] {name:<24}  {w:>6.2%}  {icir_str}  {bar}")
     print(sep)
-    print(f"  Total                       {sum(weights.values()):>6.2%}")
+    print(f"[INFO] Total                       {sum(weights.values()):>6.2%}")
     print(f"{'='*52}\n")

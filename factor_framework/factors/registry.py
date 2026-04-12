@@ -80,15 +80,15 @@ class AuditReport:
         """终端打印可读的审计报告。"""
         sep = "─" * 64
         print(f"\n{sep}")
-        print(f"  Phase E1 Metadata Audit Report")
+        print(f"[INFO] Phase E1 Metadata Audit Report")
         print(sep)
-        print(f"  Total factors : {self.total}")
-        print(f"  Complete      : {self.complete}  ({self.completeness_pct:.1f}%)")
-        print(f"  Incomplete    : {self.incomplete}")
+        print(f"[INFO] Total factors : {self.total}")
+        print(f"[INFO] Complete      : {self.complete}  ({self.completeness_pct:.1f}%)")
+        print(f"[INFO] Incomplete    : {self.incomplete}")
         print(sep)
 
         if not self.rows:
-            print("  [OK] All factors have complete E1 metadata.")
+            print("[INFO] [OK] All factors have complete E1 metadata.")
         else:
             # 按缺失字段数（多→少）排序
             sorted_rows = sorted(self.rows, key=lambda r: -len(r["missing"]))
@@ -96,15 +96,15 @@ class AuditReport:
             name_w = max(len(r["name"]) for r in sorted_rows) + 2
             for r in sorted_rows:
                 missing_str = ", ".join(r["missing"])
-                print(f"  {'[MISSING]':<8}  {r['name']:<{name_w}}  Missing: {missing_str}")
+                print(f"[WARN] {'[MISSING]':<8}  {r['name']:<{name_w}}  Missing: {missing_str}")
 
         print(sep)
         if self.missing_by_field:
-            print("  Missing count by field:")
+            print("[INFO] Missing count by field:")
             for f in _E1_FIELDS:
                 n = len(self.missing_by_field.get(f, []))
                 bar = "█" * n
-                print(f"    {f:<20} {n:>3}  {bar}")
+                print(f"[INFO] {f:<20} {n:>3}  {bar}")
         print(sep + "\n")
 
     def to_df(self) -> pd.DataFrame:

@@ -194,7 +194,7 @@ class FactorEngine:
     ):
         if not _internal and not FactorEngine._deprecation_warned:
             warnings.warn(
-                "Direct FactorEngine instantiation is a compatibility path (v3.2+).\n"
+                "[WARN] Direct FactorEngine instantiation is a compatibility path (v3.2+).\n"
                 "New code should use PanelBuilder + CSVDataStore (see README primary path).\n"
                 "To suppress this warning, instantiate via PanelBuilder (_internal=True is set automatically).",
                 DeprecationWarning,
@@ -244,7 +244,7 @@ class FactorEngine:
             if "ts_code" in sb.columns and "industry" in sb.columns:
                 self._industry_map = sb.set_index("ts_code")["industry"]
         else:
-            warnings.warn(f"stock_basic file not found: {self.stock_basic}")
+            warnings.warn(f"[WARN] stock_basic file not found: {self.stock_basic}")
 
     @property
     def industry_map(self) -> Optional[pd.Series]:
@@ -286,7 +286,7 @@ class FactorEngine:
             )
         """
         if name in self._registry:
-            warnings.warn(f"Factor '{name}' already exists and will be overwritten.")
+            warnings.warn(f"[WARN] Factor '{name}' already exists and will be overwritten.")
         self._registry[name] = func
         if deps:
             self._dep_graph.register(name, deps)
@@ -310,9 +310,9 @@ class FactorEngine:
         """
         from factor_framework.dag import Expr as _Expr
         if not isinstance(expr, _Expr):
-            raise TypeError(f"register_expr expects an Expr object, got {type(expr)}")
+            raise TypeError(f"[ERROR] register_expr expects an Expr object, got {type(expr)}")
         if name in self._expr_registry:
-            warnings.warn(f"Expr factor '{name}' already exists and will be overwritten.")
+            warnings.warn(f"[WARN] Expr factor '{name}' already exists and will be overwritten.")
         self._expr_registry[name] = expr
         # 同时在 _registry 中注册一个占位函数（用于 build_panel 等统一接口）
         self._registry[name] = self._make_expr_fn(name)
@@ -325,7 +325,7 @@ class FactorEngine:
             executor = DAGExecutor(sym_cache, self._expr_registry)
             results = executor.run(df, factor_names=[_name])
             if _name not in results:
-                raise ValueError(f"DAG execution did not return result for factor '{_name}'.")
+                raise ValueError(f"[ERROR] DAG execution did not return result for factor '{_name}'.")
             return results[_name]
         return _fn
 
@@ -470,7 +470,7 @@ class FactorEngine:
         pd.Series，index = 交易日(str)，values = 因子值；若数据不足返回 None。
         """
         if factor_name not in self._registry:
-            raise KeyError(f"Factor '{factor_name}' is not registered. Call register() first.")
+            raise KeyError(f"[ERROR] Factor '{factor_name}' is not registered. Call register() first.")
 
         # 最终因子缓存命中（两层缓存：第一层按 symbol+factor_name）
         # 注意：启用 max_lookback 时跳过缓存（截断边界不同，防止缓存污染）
@@ -520,7 +520,7 @@ class FactorEngine:
             try:
                 result = self._registry[factor_name](df_compute)
             except Exception as e:
-                warnings.warn(f"{symbol}/{factor_name} calculation failed: {e}")
+                warnings.warn(f"[WARN] {symbol}/{factor_name} calculation failed: {e}")
                 return None
 
         if result is None:
@@ -590,7 +590,7 @@ class FactorEngine:
         try:
             return self._registry[factor_name](df)
         except Exception as e:
-            warnings.warn(f"{symbol}/{factor_name}(deps) calculation failed: {e}")
+            warnings.warn(f"[WARN] {symbol}/{factor_name}(deps) calculation failed: {e}")
             return None
 
     # ── 面板构建 ──────────────────────────────────────────────────────────────
@@ -645,12 +645,12 @@ class FactorEngine:
                         series_list.append(s)
                 except Exception as e:
                     sym = future_to_sym[future]
-                    warnings.warn(f"{sym}/{factor_name} worker exception: {e}")
+                    warnings.warn(f"[WARN] {sym}/{factor_name} worker exception: {e}")
 
         pbar.close()
 
         if not series_list:
-            warnings.warn(f"Factor '{factor_name}' has no valid data; returning empty DataFrame.")
+            warnings.warn(f"[WARN] Factor '{factor_name}' has no valid data; returning empty DataFrame.")
             return pd.DataFrame()
 
         panel = pd.concat(series_list, axis=1)
@@ -692,7 +692,7 @@ class FactorEngine:
         """
         for fn in factor_names:
             if fn not in self._registry:
-                raise KeyError(f"Factor '{fn}' is not registered. Call register() or register_expr() first.")
+                raise KeyError(f"[ERROR] Factor '{fn}' is not registered. Call register() or register_expr() first.")
 
         targets = symbols or self.all_symbols()
 
@@ -778,7 +778,7 @@ class FactorEngine:
                             full_ser.update(val)
                             df_work[f"__dep_{n}__"] = full_ser.values
                     except Exception as e:
-                        warnings.warn(f"{sym}/{n} calculation failed: {e}")
+                        warnings.warn(f"[WARN] {sym}/{n} calculation failed: {e}")
                         out[n] = None
 
             return out
@@ -796,7 +796,7 @@ class FactorEngine:
                             # 写入因子结果缓存
                             self._factor_cache.put(f"{n}|{sym}", s)
                 except Exception as e:
-                    warnings.warn(f"{sym} batch worker exception: {e}")
+                    warnings.warn(f"[WARN] {sym} batch worker exception: {e}")
 
         pbar.close()
 
@@ -806,7 +806,7 @@ class FactorEngine:
                 panel = pd.concat(series_list, axis=1).sort_index()
                 panels[n] = panel
             else:
-                warnings.warn(f"Factor '{n}' has no valid data; returning empty DataFrame.")
+                warnings.warn(f"[WARN] Factor '{n}' has no valid data; returning empty DataFrame.")
                 panels[n] = pd.DataFrame()
 
         return panels
